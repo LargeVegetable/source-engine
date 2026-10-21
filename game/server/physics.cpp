@@ -55,6 +55,33 @@ void PortalPhysFrame( float deltaTime ); //small wrapper for PhysFrame that simu
 
 void PrecachePhysicsSounds( void );
 
+#include "vita_perf.h"
+#include "fourwheelvehiclephysics.h"
+
+#ifdef PLATFORM_VITA
+// This tick's PhysFrame phases and the most objects awake, for the slow
+// server tick line (gameinterface.cpp, which zeroes them each tick)
+uint64 g_nVitaPhysSim, g_nVitaPhysUpdate, g_nVitaPhysEvents;
+int g_nVitaPhysActive;
+
+// Cheaper collision for small loose props: the server's physics
+// step cost 2-3 ms per awake object in fights, mostly planks, junk and
+// gibs knocked loose together. Two small, light prop_physics don't collide
+// with each other, so piles of junk overlap instead of stacking and need
+// no contact pairs between their pieces; each still collides normally with
+// the world, larger props, NPCs, the player and bullets. Decided when IVP
+// forms a pair (not per frame), and from the entity and its mass, so props
+// restored from saves are covered too
+static ConVar vita_physics_small_props( "vita_physics_small_props", "1", FCVAR_NONE,
+	"Vita: small, light physics props (vita_physics_small_mass kg or less) don't collide with each other; 0 = stock. New pairs only (takes full effect on a map load)" );
+static ConVar vita_physics_small_mass( "vita_physics_small_mass", "20", FCVAR_NONE, "Vita: the mass limit (kg) for vita_physics_small_props" );
+
+static bool VitaIsSmallLooseProp( CBaseEntity *pEntity, IPhysicsObject *pObject )
+{
+	return FClassnameIs( pEntity, "prop_physics" ) && pObject->GetMass() <= vita_physics_small_mass.GetFloat();
+}
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -244,6 +271,13 @@ void CPhysicsHook::LevelInitPreEntity()
 	physenv->SetObjectEventHandler( &g_Collisions );
 
 	physenv->SetSimulationTimestep( gpGlobals->interval_per_tick ); // 15 ms per tick
+#ifdef PLATFORM_VITA
+	// SetPerformanceSettings turns the angular speed limit into a per-step
+	// value using the step length at the time: applied above, before the
+	// step became the 30 ms tick (-tickrate 33), it allowed half the stock
+	// spin. Apply again for the real step
+	physenv->SetPerformanceSettings( &params );
+#endif
 	// HL Game gravity, not real-world gravity
 	physenv->SetGravity( Vector( 0, 0, -GetCurrentGravity() ) );
 	g_PhysAverageSimTime = 0;
@@ -510,6 +544,11 @@ int CCollisionEvent::ShouldCollide_2( IPhysicsObject *pObj0, IPhysicsObject *pOb
 
 	if ( pEntity0->ForceVPhysicsCollide( pEntity1 ) || pEntity1->ForceVPhysicsCollide( pEntity0 ) )
 		return 1;
+
+#ifdef PLATFORM_VITA
+	if ( vita_physics_small_props.GetBool() && VitaIsSmallLooseProp( pEntity0, pObj0 ) && VitaIsSmallLooseProp( pEntity1, pObj1 ) )
+		return 0;
+#endif
 
 	if ( pEntity0->edict() && pEntity1->edict() )
 	{
@@ -1668,6 +1707,38 @@ void PortalPhysFrame( float deltaTime ) //small wrapper for PhysFrame that simul
 #endif
 
 // Advance physics by time (in seconds)
+#ifdef PLATFORM_VITA
+// Physics steps once per server tick, 30 ms at -tickrate 33 (PC: 15 ms).
+// Wheeled vehicles' suspension jitters and bounces at that step (the Combine
+// APCs in Water Hazard), so while one is awake, and for 2 s after,
+// the step is this instead: two steps per tick, about twice the simulation
+// time. The airboat isn't counted (fourwheelvehiclephysics.cpp)
+static ConVar vita_phys_vehicle_step( "vita_phys_vehicle_step", "0.015", FCVAR_NONE,
+	"Vita: physics step (s) while a wheeled vehicle (APC, jeep) is awake; otherwise the server tick. 0 = always the tick" );
+
+static void VitaUpdatePhysicsStep()
+{
+	static float s_flVehicleAwakeUntil = 0;
+	const float flTick = gpGlobals->interval_per_tick;
+	float flStep = flTick;
+	const float flVehicleStep = vita_phys_vehicle_step.GetFloat();
+	if ( flVehicleStep > 0.0f && flVehicleStep < flTick )
+	{
+		if ( CFourWheelVehiclePhysics::VitaWheeledVehicleAwake() )
+			s_flVehicleAwakeUntil = gpGlobals->curtime + 2.0f;
+		if ( gpGlobals->curtime < s_flVehicleAwakeUntil )
+			flStep = flVehicleStep;
+	}
+	if ( fabsf( physenv->GetSimulationTimestep() - flStep ) < 0.0001f )
+		return;
+	physenv->SetSimulationTimestep( flStep );
+	// the angular speed limit is stored per step: set it for the new step
+	physics_performanceparams_t params;
+	physenv->GetPerformanceSettings( &params );
+	physenv->SetPerformanceSettings( &params );
+}
+#endif
+
 void PhysFrame( float deltaTime )
 {
 	static int lastObjectCount = 0;
@@ -1709,9 +1780,26 @@ void PhysFrame( float deltaTime )
 	g_Collisions.BufferTouchEvents( true );
 #endif
 
-	physenv->Simulate( deltaTime );
+#ifdef PLATFORM_VITA
+	VitaUpdatePhysicsStep();
+	uint64 nVitaPhase = so_perf_now();
+#endif
+	{
+		// the frame: line's server physics (the client's own environment,
+		// ragdolls and debris, simulates on the main thread and isn't counted)
+		VITA_PERF_SCOPE( VITA_PERF_PHYSICS );
+		VITA_PROFILE_SCOPE( "PhysFrame simulate" );
+		physenv->Simulate( deltaTime );
+	}
+#ifdef PLATFORM_VITA
+	g_nVitaPhysSim += so_perf_now() - nVitaPhase;
+	nVitaPhase = so_perf_now();
+#endif
 
 	int activeCount = physenv->GetActiveObjectCount();
+#ifdef PLATFORM_VITA
+	g_nVitaPhysActive = MAX( g_nVitaPhysActive, activeCount );
+#endif
 	IPhysicsObject **pActiveList = NULL;
 	if ( activeCount )
 	{
@@ -1727,6 +1815,9 @@ void PhysFrame( float deltaTime )
 				{
 					pEntity->CollisionProp()->MarkSurroundingBoundsDirty();
 				}
+#ifdef PLATFORM_VITA
+				CVitaProfileScope vitaScope( "vphysupdate", pEntity->GetClassname() );
+#endif
 				pEntity->VPhysicsUpdate( pActiveList[i] );
 			}
 		}
@@ -1746,9 +1837,17 @@ void PhysFrame( float deltaTime )
 		// apply updates
 		if ( pPhysics && !pPhysics->IsAsleep() )
 		{
+#ifdef PLATFORM_VITA
+			CVitaProfileScope vitaScope( "shadowupdate", pEntity->GetClassname() );
+#endif
 			pEntity->VPhysicsShadowUpdate( pPhysics );
 		}
 	}
+
+#ifdef PLATFORM_VITA
+	g_nVitaPhysUpdate += so_perf_now() - nVitaPhase;
+	nVitaPhase = so_perf_now();
+#endif
 
 	if ( bProfile )
 	{
@@ -1767,8 +1866,17 @@ void PhysFrame( float deltaTime )
 	}
 
 #ifndef PORTAL //instead of wrapping 1 simulation with this, portal needs to wrap 3
-	g_Collisions.BufferTouchEvents( false );
-	g_Collisions.FrameUpdate();
+	{
+		VITA_PROFILE_SCOPE( "PhysFrame touch events" );
+		g_Collisions.BufferTouchEvents( false );
+	}
+	{
+		VITA_PROFILE_SCOPE( "PhysFrame collisions" );
+		g_Collisions.FrameUpdate();
+	}
+#ifdef PLATFORM_VITA
+	g_nVitaPhysEvents += so_perf_now() - nVitaPhase;
+#endif
 #endif
 }
 

@@ -233,6 +233,10 @@ extern IVEngineClient *engineClient;
 // Purpose: A svc_signonnum has been received, perform a client side setup
 // Output : void CL_SignonReply
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+extern "C" void so_heap_check( const char *where );	// launcher (heap checks with -vitadebug)
+#endif
+
 bool CClientState::SetSignonState ( int state, int count )
 {
 	if ( !CBaseClientState::SetSignonState( state, count ) )
@@ -244,6 +248,15 @@ bool CClientState::SetSignonState ( int state, int count )
 	// ConDMsg ("Signon state: %i\n", state );
 
 	COM_TimestampedLog( "CClientState::SetSignonState: start %i", state );
+#ifdef PLATFORM_VITA
+	{
+		// heap check at each loading step with -vitadebug (a rare crash in
+		// newlib's malloc came while a map loaded; ~0.1 s each)
+		static const char *s_pszVitaSignon[] = { "signon none", "signon challenge", "signon connected", "signon new", "signon prespawn", "signon spawn", "signon full", "signon changelevel" };
+		if ( ( state == SIGNONSTATE_NEW || state == SIGNONSTATE_FULL ) && CommandLine()->CheckParm( "-vitadebug" ) )
+			so_heap_check( s_pszVitaSignon[state] );
+	}
+#endif
 
 	switch ( m_nSignonState )
 	{

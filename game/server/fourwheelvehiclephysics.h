@@ -106,6 +106,12 @@ public:
 
 	int VPhysicsGetObjectList( IPhysicsObject **pList, int listMax );
 
+#ifdef PLATFORM_VITA
+	// A wheeled vehicle (APC, jeep; not the airboat) is awake: physics.cpp
+	// steps physics at vita_phys_vehicle_step while one is
+	static bool VitaWheeledVehicleAwake();
+#endif
+
 private:
 	// engine sounds
 	void CalcWheelData( vehicleparams_t &vehicle );

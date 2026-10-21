@@ -18,7 +18,11 @@
 
 ConVar mat_disable_lightwarp( "mat_disable_lightwarp", "0" );
 ConVar mat_disable_fancy_blending( "mat_disable_fancy_blending", "0" );
+#ifdef PLATFORM_VITA
+ConVar mat_fullbright( "mat_fullbright","0", FCVAR_NONE );	// not a cheat on the Vita (engine/matsys_interface.cpp)
+#else
 ConVar mat_fullbright( "mat_fullbright","0", FCVAR_CHEAT );
+#endif
 ConVar my_mat_fullbright( "mat_fullbright","0", FCVAR_CHEAT );
 extern ConVar r_flashlight_version2;
 
@@ -313,6 +317,13 @@ void DrawLightmappedGeneric_DX9_Internal(CBaseVSShader *pShader, IMaterialVar** 
 			(info.m_nBlendModulateTexture != -1) &&
 			(params[info.m_nBlendModulateTexture]->IsTexture() );
 		bool hasNormalMapAlphaEnvmapMask = IS_FLAG_SET( MATERIAL_VAR_NORMALMAPALPHAENVMAPMASK );
+#ifdef PLATFORM_VITA
+		// The mask lives in the normal map's alpha, so it means nothing without
+		// a bump map; with bump maps off (mat_bumpmap 0, reduced fillrate) the
+		// flag alone selects static combos the shipped .vcs files don't have,
+		// and every world material using it failed to draw
+		hasNormalMapAlphaEnvmapMask = hasNormalMapAlphaEnvmapMask && hasBump;
+#endif
 
 		if ( hasFlashlight && !IsX360() )				
 		{

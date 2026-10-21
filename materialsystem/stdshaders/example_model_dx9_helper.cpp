@@ -17,7 +17,11 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+#ifdef PLATFORM_VITA
+static ConVar mat_fullbright( "mat_fullbright", "0", FCVAR_NONE );	// not a cheat on the Vita (engine/matsys_interface.cpp)
+#else
 static ConVar mat_fullbright( "mat_fullbright", "0", FCVAR_CHEAT );
+#endif
 static ConVar r_lightwarpidentity( "r_lightwarpidentity", "0", FCVAR_CHEAT );
 static ConVar r_rimlight( "r_rimlight", "1", FCVAR_NONE );
 

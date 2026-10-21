@@ -61,7 +61,14 @@ struct GLMBuffLockParams
 	bool m_bDiscard;			
 };
 
+#ifdef PLATFORM_VITA
+// The static buffers are only used with -gl_enable_static_buffer (off by
+// default), but a module's static data is real memory on the Vita: 4 MB of
+// it here. Locks bigger than this take the normal path even when enabled
+#define GL_STATIC_BUFFER_SIZE	( 16 )
+#else
 #define GL_STATIC_BUFFER_SIZE	( 2048 * 1024 )
+#endif
 #define GL_MAX_STATIC_BUFFERS	2
 
 extern void glBufferSubDataMaxSize( GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data, uint nMaxSizePerCall = 128 * 1024 );

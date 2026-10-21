@@ -27,11 +27,15 @@
 //===============================================================================
 
 #include "togles/rendermechanism.h"
+#include "vita_perf.h"
 
 #include "filesystem.h"
 #include "tier1/fmtstr.h"
 #include "tier1/KeyValues.h"
 #include "tier0/fasttimer.h"
+#ifdef PLATFORM_VITA
+#include "vita_glsl.h"
+#endif
 
 #if GLMDEBUG && defined( _MSC_VER )
 #include <direct.h>
@@ -121,6 +125,17 @@ CGLMProgram::CGLMProgram( GLMContext *ctx, EGLMProgramType type )
 	GLenum glslStage = GLMProgTypeToGLSLEnum( m_type );
 
 	glslDesc->m_object.glsl = gGL->glCreateShader( glslStage );;
+#ifdef PLATFORM_VITA
+	// vitaGL returns 0 when its shader table (MAX_CUSTOM_SHADERS) is full, and
+	// indexes its table with handle - 1 unchecked: such a program is never
+	// compiled or linked (Compile, SetProgramPair) and its pairs are invalid
+	if ( !glslDesc->m_object.glsl )
+	{
+		static int s_nVitaShaderFails = 0;
+		if ( s_nVitaShaderFails++ < 4 )
+			Warning( "[vita] glCreateShader failed: vitaGL shader slots exhausted\n" );
+	}
+#endif
 
 	m_shaderName[0] = '\0';
 
@@ -319,6 +334,14 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 			
 			// no GLSL program either
 			gGL->glUseProgram(0);
+#ifdef PLATFORM_VITA
+			if ( !glslDesc->m_object.glsl )	// glCreateShader failed (see the constructor)
+			{
+				glslDesc->m_compiled = true;
+				glslDesc->m_valid = false;
+				break;
+			}
+#endif
 			
 			// pump text into GLSL shader object
 
@@ -346,10 +369,22 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 				}
 			#endif
 
+#ifdef PLATFORM_VITA
+			// vitaGL only translates GLSL ES 1.00
+			std::string vitaSource;
+			VitaConvertGLSL( section, glslDesc->m_textLength, glslStage == GL_FRAGMENT_SHADER, vitaSource );
+			const GLchar *pVitaSource = vitaSource.c_str();
+			GLint nVitaLength = (GLint)vitaSource.size();
+			gGL->glShaderSource( glslDesc->m_object.glsl, 1, &pVitaSource, &nVitaLength );
+#else
 			gGL->glShaderSource( glslDesc->m_object.glsl, 1, (const GLchar **)&section, &glslDesc->m_textLength);	
+#endif
 
 			// compile
-			gGL->glCompileShader( glslDesc->m_object.glsl );
+			{
+				VITA_PERF_SCOPE( VITA_PERF_SHADER_COMPILE );
+				gGL->glCompileShader( glslDesc->m_object.glsl );
+			}
 
 			GLint isCompiled = 0;
 			gGL->glGetShaderiv(glslDesc->m_object.glsl, GL_COMPILE_STATUS, &isCompiled);
@@ -362,11 +397,17 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 				GLchar  log[4096];
 				gGL->glGetShaderInfoLog( glslDesc->m_object.glsl, sizeof(log), &maxLength, log );
 				Msg("shader compile log: %s\n", log);
-				Msg("Shader %d source is:\n===============\n%s\nn===============\n", glslDesc->m_object.glsl, section);											
+#ifdef PLATFORM_VITA
+				Msg("Shader %d source is:\n===============\n%s\nn===============\n", glslDesc->m_object.glsl, vitaSource.c_str());
+#else
+				Msg("Shader %d source is:\n===============\n%s\nn===============\n", glslDesc->m_object.glsl, section);
+#endif											
 			}
 
-#if 0 //GLM_FREE_SHADER_TEXT
+#if GLM_FREE_SHADER_TEXT
 			// Free the shader program text - not needed anymore (GL has its own copy)
+			// (Vita: was compiled out; the metadata parse reads the translation
+			// buffer, so the only reader left was shader_dump.txt below)
 			if ( m_text && !m_descs[kGLMARB].m_textPresent )
 			{
 				free( m_text );
@@ -691,6 +732,16 @@ CGLMShaderPair::CGLMShaderPair( GLMContext *ctx  )
 	m_vertexProg = m_fragmentProg = NULL;
 
 	m_program = gGL->glCreateProgram();
+#ifdef PLATFORM_VITA
+	// vitaGL returns 0 when MAX_CUSTOM_PROGRAMS is used up; a 0 program is
+	// never linked (SetProgramPair), so the pair stays invalid
+	if ( !m_program )
+	{
+		static int s_nVitaProgramFails = 0;
+		if ( s_nVitaProgramFails++ < 4 )
+			Warning( "[vita] glCreateProgram failed: vitaGL program slots exhausted\n" );
+	}
+#endif
 
 	m_locVertexParams = -1;
 	m_locAlphaRef = -1;
@@ -899,6 +950,7 @@ bool CGLMShaderPair::ValidateProgramPair()
 // glUseProgram() will be called as a side effect!
 bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 {
+	VITA_CHECK_RENDER_THREAD( "shader pair linked" );
 	bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
 	// If using "-gl_time_shader_compiles", keeps track of total cycle count spent on shader compiles.
 	CFastTimer shaderCompileTimer;
@@ -917,6 +969,11 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 	// building in parallels)
 	bool vpgood = (vp != NULL);
 	bool fpgood = (fp != NULL);
+#ifdef PLATFORM_VITA
+	// out of vitaGL program or shader slots: leave the pair invalid
+	if ( !m_program || ( vp && !vp->m_descs[kGLMGLSL].m_object.glsl ) || ( fp && !fp->m_descs[kGLMGLSL].m_object.glsl ) )
+		return false;
+#endif
 	
 	if ( !fpgood )
 	{
@@ -978,11 +1035,24 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 		}
 #endif
 
+#ifdef PLATFORM_VITA
+		// each link is logged with its time (on-device compiles stall)
+		static int s_nLinks = 0;
+		s_nLinks++;
+		double flLinkStart = Plat_FloatTime();
+#endif
+
 		// now link
 		gGL->glLinkProgram( m_program );
 
 		GLint isLinked = 0;
 		gGL->glGetProgramiv(m_program, GL_LINK_STATUS, &isLinked);
+#ifdef PLATFORM_VITA
+		static const bool s_bVitaDebug = CommandLine()->CheckParm( "-vitadebug" ) != NULL;
+		if ( s_bVitaDebug || !isLinked )
+			Msg( "[vita] shader pair %d %s in %.2f s: %s / %s\n", s_nLinks, isLinked ? "linked" : "FAILED", Plat_FloatTime() - flLinkStart,
+				vp->m_shaderName, fp->m_shaderName );
+#endif
 		if(isLinked == GL_FALSE)
 		{
 			GLint maxLength = 0;

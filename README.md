@@ -1,3 +1,15 @@
+# Half-Life 2 for PS Vita
+
+This is the **`vita` branch**: an unofficial PS Vita port of Half-Life 2, built on nillerusr's Source engine (its original README follows below).
+
+- **[Download the latest release](../../releases/latest)**
+- **[README_VITA.md](README_VITA.md)**: status, features, controls and requirements
+- **[INSTALL_VITA.md](INSTALL_VITA.md)**: setting it up, step by step
+
+No game files are included: you need your own copy of Half-Life 2 on Steam.
+
+---
+
 # Source Engine
 [![GitHub Actions Status](https://github.com/nillerusr/source-engine/actions/workflows/build.yml/badge.svg)](https://github.com/nillerusr/source-engine/actions/workflows/build.yml) [![GitHub Actions Status](https://github.com/nillerusr/source-engine/actions/workflows/tests.yml/badge.svg)](https://github.com/nillerusr/source-engine/actions/workflows/tests.yml)
  Discord: [![Discord Server](https://img.shields.io/discord/672055862608658432.svg)](https://discord.gg/hZRB7WMgGw)

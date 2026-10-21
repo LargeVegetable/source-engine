@@ -116,7 +116,14 @@ ConVar	mat_envmapsize(  "mat_envmapsize", "128" );
 ConVar  mat_envmaptgasize( "mat_envmaptgasize", "32.0" );
 ConVar  mat_levelflush( "mat_levelflush", "1" );
 ConVar  mat_fastspecular( "mat_fastspecular", "1", 0, "Enable/Disable specularity for visual testing.  Will not reload materials and will not affect perf." );
+#ifdef PLATFORM_VITA
+// Vita: lightmaps on by default; not a cheat here, so vita_user.cfg can set
+// mat_fullbright 1 (no lighting, slightly cheaper). Defined in the material
+// system too; the two link by name, keep them in step
+ConVar  mat_fullbright( "mat_fullbright","0", FCVAR_NONE );
+#else
 ConVar  mat_fullbright( "mat_fullbright","0", FCVAR_CHEAT );
+#endif
 
 static ConVar mat_monitorgamma( "mat_monitorgamma", "2.2", FCVAR_ARCHIVE, "monitor gamma (typically 2.2 for CRT and 1.7 for LCD)", true, 1.6f, true, 2.6f  );
 static ConVar mat_monitorgamma_tv_range_min( "mat_monitorgamma_tv_range_min", "16" );
@@ -2136,6 +2143,7 @@ void WorldStaticMeshCreate( void )
 		g_WorldStaticMeshes[i] = NULL;
 		sortIndex[i] = surfID ? FindOrAddMesh( MSurf_TexInfo( surfID )->material, vertexCount ) : -1;
 	}
+
 
 	CMatRenderContextPtr pRenderContext( materials );
 

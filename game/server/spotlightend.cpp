@@ -46,7 +46,14 @@ void CSpotlightEnd::Spawn( void )
 	Precache();
 	m_flLightScale  = 100;
 	SetSolid( SOLID_NONE );
+#ifdef PLATFORM_VITA
+	// Non-solid and placed by its owner's own trace each think; FLY swept it
+	// through the world every tick (25-80 ms/s of server time in
+	// d1_trainstation). NOCLIP still moves it by its velocity between thinks.
+	SetMoveType( MOVETYPE_NOCLIP );
+#else
 	SetMoveType( MOVETYPE_FLY );
+#endif
 	UTIL_SetSize( this, vec3_origin, vec3_origin );
 	AddEFlags( EFL_FORCE_CHECK_TRANSMIT );
 }

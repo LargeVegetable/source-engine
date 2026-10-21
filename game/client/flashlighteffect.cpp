@@ -32,7 +32,13 @@ extern ConVar r_flashlightdepthtexture;
 
 void r_newflashlightCallback_f( IConVar *pConVar, const char *pOldString, float flOldValue );
 
+#ifdef PLATFORM_VITA
+// the projected-texture flashlight needs shader combos compiled on the device
+// and drew dim and blue; the old one is a dynamic light (r_dynamic 1)
+static ConVar r_newflashlight( "r_newflashlight", "0", FCVAR_CHEAT, "", r_newflashlightCallback_f );
+#else
 static ConVar r_newflashlight( "r_newflashlight", "1", FCVAR_CHEAT, "", r_newflashlightCallback_f );
+#endif
 static ConVar r_swingflashlight( "r_swingflashlight", "1", FCVAR_CHEAT );
 static ConVar r_flashlightlockposition( "r_flashlightlockposition", "0", FCVAR_CHEAT );
 static ConVar r_flashlightfov( "r_flashlightfov", "45.0", FCVAR_CHEAT );
@@ -371,6 +377,12 @@ void CFlashlightEffect::UpdateLightNew(const Vector &vecPos, const Vector &vecFo
 //-----------------------------------------------------------------------------
 // Purpose: Do the headlight
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+#define VITA_FLASHLIGHT_RADIUS 120	// the stock 80 lit a very small spot
+#else
+#define VITA_FLASHLIGHT_RADIUS 80
+#endif
+
 void CFlashlightEffect::UpdateLightOld(const Vector &vecPos, const Vector &vecDir, int nDistance)
 {
 	if ( !m_pPointLight || ( m_pPointLight->key != m_nEntIndex ))
@@ -378,7 +390,7 @@ void CFlashlightEffect::UpdateLightOld(const Vector &vecPos, const Vector &vecDi
 		// Set up the environment light
 		m_pPointLight = effects->CL_AllocDlight(m_nEntIndex);
 		m_pPointLight->flags = 0.0f;
-		m_pPointLight->radius = 80;
+		m_pPointLight->radius = VITA_FLASHLIGHT_RADIUS;
 	}
 	
 	// For bumped lighting
@@ -402,7 +414,7 @@ void CFlashlightEffect::UpdateLightOld(const Vector &vecPos, const Vector &vecDi
 	
 	falloff *= falloff;
 	
-	m_pPointLight->radius = 80;
+	m_pPointLight->radius = VITA_FLASHLIGHT_RADIUS;
 	m_pPointLight->color.r = m_pPointLight->color.g = m_pPointLight->color.b = 255 * falloff;
 	m_pPointLight->color.exponent = 0;
 	

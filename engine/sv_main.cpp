@@ -74,6 +74,11 @@
 #include "voice.h"
 #include "cbenchmark.h"
 
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+#include <malloc.h>
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 #include "tier0/memalloc.h"
@@ -1853,6 +1858,7 @@ static void SV_ParallelSendSnapshot( CGameClient *& pClient )
 void CGameServer::SendClientMessages ( bool bSendSnapshots )
 {
 	VPROF_BUDGET( "SendClientMessages", VPROF_BUDGETGROUP_OTHER_NETWORKING );
+	VITA_PERF_SCOPE( VITA_PERF_SV_SEND );
 	
 	// build individual updates
 	int receivingClientCount = 0;
@@ -2500,6 +2506,9 @@ bool CGameServer::SpawnServer( const char *szMapName, const char *szMapFile, con
 
 	if ( g_FlushMemoryOnNextServer )
 	{
+#ifdef PLATFORM_VITA
+		struct mallinfo miVitaBefore = mallinfo();
+#endif
 		g_FlushMemoryOnNextServer = false;
 		if ( IsX360() )
 		{
@@ -2518,6 +2527,10 @@ bool CGameServer::SpawnServer( const char *szMapName, const char *szMapFile, con
 		g_pFileSystem->AsyncResume();
 		g_SndMutex.Unlock();
 #endif // SWDS
+#ifdef PLATFORM_VITA
+		struct mallinfo miVitaAfter = mallinfo();
+		Msg( "[vita] full flush: heap %u -> %u MB in use\n", (unsigned)( miVitaBefore.uordblks >> 20 ), (unsigned)( miVitaAfter.uordblks >> 20 ) );
+#endif
 	}
 
 	// Preload any necessary data from the xzps:

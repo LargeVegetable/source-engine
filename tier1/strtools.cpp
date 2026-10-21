@@ -2357,6 +2357,14 @@ bool V_MakeRelativePath( const char *pFullPath, const char *pDirectory, char *pR
 bool V_IsAbsolutePath( const char *pStr )
 {
 	bool bIsAbsolute = ( pStr[0] && pStr[1] == ':' ) || pStr[0] == '/' || pStr[0] == '\\';
+#ifdef PLATFORM_VITA
+	// device paths: "ux0:data/...", "app0:bin/..."
+	if ( !bIsAbsolute )
+	{
+		const char *pColon = strchr( pStr, ':' );
+		bIsAbsolute = pColon && pColon > pStr && !memchr( pStr, '/', pColon - pStr );
+	}
+#endif
 	if ( IsX360() && !bIsAbsolute )
 	{
 		bIsAbsolute = ( V_stristr( pStr, ":" ) != NULL );

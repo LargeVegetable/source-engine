@@ -22,7 +22,7 @@
 #define closesocket close
 #define WSAGetLastError() errno
 #define ioctlsocket ioctl
-#ifdef OSX
+#if defined( OSX ) || defined( PLATFORM_VITA )
 #define MSG_NOSIGNAL 0
 #endif
 #endif

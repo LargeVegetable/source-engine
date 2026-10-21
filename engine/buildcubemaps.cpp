@@ -49,7 +49,11 @@
 #include "tier0/memdbgon.h"
 
 // putting this here so that it is replicated to the client.dll and materialsystem.dll
+#ifdef PLATFORM_VITA
+ConVar dynamic_tonemap( "mat_dynamic_tonemapping", "0", FCVAR_CHEAT );
+#else
 ConVar dynamic_tonemap( "mat_dynamic_tonemapping", "1", FCVAR_CHEAT );
+#endif
 ConVar building_cubemaps( "building_cubemaps", "0" );
 ConVar reload_materials( "reload_materials", "0" );
 ConVar r_DrawBeams( "r_DrawBeams", "1", FCVAR_CHEAT, "0=Off, 1=Normal, 2=Wireframe" );

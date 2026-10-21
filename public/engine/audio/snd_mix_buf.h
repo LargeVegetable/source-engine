@@ -96,7 +96,11 @@ extern portable_samplepair_t *g_curcenterpaintbuffer;
 #define	PAINTBUFFER_MEM_SIZE		(PAINTBUFFER_SIZE+4)
 
 // size in samples of copy buffer used by pitch shifters in mixing
-#if defined(_GAMECONSOLE)
+#if defined(PLATFORM_VITA)
+// at a 22050 output rate a 44k source at max pitch (2.55) reads ~5.1 input
+// samples per output sample
+#define TEMP_COPY_BUFFER_SIZE	(PAINTBUFFER_MEM_SIZE * 8)
+#elif defined(_GAMECONSOLE)
 #define TEMP_COPY_BUFFER_SIZE	(PAINTBUFFER_MEM_SIZE * 2)
 #else
 // allow more memory for this on PC for developers to pitch-shift their way through dialog

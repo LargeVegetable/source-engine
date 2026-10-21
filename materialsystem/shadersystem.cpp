@@ -314,7 +314,12 @@ void CShaderSystem::LoadAllShaderDLLs( )
 	SetupShaderDictionary( i );
 
 	// 360 has the the debug shaders in its dx9 dll
+#ifdef PLATFORM_VITA
+	// the Vita ships only stdshader_dx9 (launcher_vita/build.sh)
+	if ( false )
+#else
 	if ( IsPC() || !IsX360() )
+#endif
 	{
 		// Always need the debug shaders
 		LoadShaderDLL( "stdshader_dbg" DLL_EXT_STRING );
@@ -326,7 +331,11 @@ void CShaderSystem::LoadAllShaderDLLs( )
 	dxSupportLevel /= 10;
 
 	// 360 only supports its dx9 dll
+#ifdef PLATFORM_VITA
+	int dxStart = 9;
+#else
 	int dxStart = IsX360() ? 9 : 6;
+#endif
 	char buf[32];
 	for ( i = dxStart; i <= dxSupportLevel; ++i )
 	{

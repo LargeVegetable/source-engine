@@ -22,6 +22,7 @@
 #define CLzmaDec_t CLzmaDec
 #include "tier1/lzmaDecoder.h"
 #include "tier1/convar.h"
+#include "vita_perf.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -134,15 +135,13 @@ unsigned int CLZMA::Uncompress( unsigned char *pInput, unsigned char *pOutput )
 		return false;
 	}
 
-	CLzmaDec state;
+	// LzmaDecode uses the output buffer as its dictionary. A separate decoder
+	// state allocated here had a dictionary of the full dictionary size
+	// (16 MB for shader combos) that was never used, which ran the Vita out
+	// of memory on its own.
 
-	LzmaDec_Construct(&state);
-
-	if ( LzmaDec_Allocate(&state, pHeader->properties, LZMA_PROPS_SIZE, &g_Alloc) != SZ_OK )
-	{
-		Assert( false );
-		return 0;
-	}
+	VITA_PERF_SCOPE( VITA_PERF_LZMA );
+	VITA_PERF_AMOUNT( LittleLong(pHeader->actualSize) );
 
 	// These are in/out variables
 	SizeT outProcessed = LittleLong(pHeader->actualSize);
@@ -151,8 +150,6 @@ unsigned int CLZMA::Uncompress( unsigned char *pInput, unsigned char *pOutput )
 	SRes result = LzmaDecode( (Byte *)pOutput, &outProcessed, (Byte *)(pInput + sizeof( lzma_header_t ) ),
 	                          &inProcessed, (Byte *)pHeader->properties, LZMA_PROPS_SIZE, LZMA_FINISH_END, &status, &g_Alloc );
 
-
-	LzmaDec_Free(&state, &g_Alloc);
 
 	if ( result != SZ_OK || LittleLong(pHeader->actualSize) != outProcessed )
 	{

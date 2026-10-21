@@ -279,7 +279,11 @@ void CPointSpotlight::OnEntityEvent( EntityEvent_t event, void *pEventData )
 			m_bEfficientSpotlight = false;
 			if ( m_hSpotlightTarget )
 			{
+#ifdef PLATFORM_VITA
+				m_hSpotlightTarget->SetMoveType( MOVETYPE_NOCLIP );	// see CSpotlightEnd::Spawn
+#else
 				m_hSpotlightTarget->SetMoveType( MOVETYPE_FLY );
+#endif
 			}
 			SetThink( &CPointSpotlight::SpotlightThink );
 			SetNextThink( gpGlobals->curtime + 0.1f );

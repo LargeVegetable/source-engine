@@ -3703,7 +3703,7 @@ int D3DToGL::TranslateShader( uint32* code, CUtlBuffer *pBufDisassembledCode, bo
 
 	if ( m_bUsesDSTInstruction )
 	{
-		PrintToBuf( *m_pBufHeaderCode, "vec4 dst(vec4 src0,vec4 src1) { return vec4(1.0f,src0.y*src1.y,src0.z,src1.w); }\n" );
+		PrintToBuf( *m_pBufHeaderCode, "vec4 dst(vec4 src0,vec4 src1) { return vec4(1.0,src0.y*src1.y,src0.z,src1.w); }\n" );
 	}
 	
 	if ( m_bDeclareAddressReg )
@@ -3928,7 +3928,7 @@ int D3DToGL::TranslateShader( uint32* code, CUtlBuffer *pBufDisassembledCode, bo
 	{
 		StrcatToALUCode( "vec3 sRGBFragData;\n" );
 		StrcatToALUCode( "sRGBFragData.xyz = log( gl_FragData[0].xyz );\n" );
-		StrcatToALUCode( "sRGBFragData.xyz = sRGBFragData.xyz * vec3( 0.454545f, 0.454545f, 0.454545f );\n" );
+		StrcatToALUCode( "sRGBFragData.xyz = sRGBFragData.xyz * vec3( 0.454545, 0.454545, 0.454545 );\n" );
 		StrcatToALUCode( "sRGBFragData.xyz = exp( sRGBFragData.xyz );\n" );
 		StrcatToALUCode( "gl_FragData[0].xyz = mix( gl_FragData[0].xyz, sRGBFragData, flSRGBWrite );\n" );
 	}

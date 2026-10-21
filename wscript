@@ -237,6 +237,16 @@ def define_platform(conf):
 			'_DLL_EXT=.so'
 		])
 		
+	elif conf.env.DEST_OS == 'vita':
+		conf.env.append_unique('DEFINES', [
+			'PLATFORM_VITA=1', '_VITA=1',
+			'LINUX=1', '_LINUX=1',
+			'POSIX=1', '_POSIX=1', 'PLATFORM_POSIX=1',
+			'GNUC',
+			'NO_HOOK_MALLOC',
+			'_DLL_EXT=.so'
+		])
+
 	elif conf.env.DEST_OS == 'win32':
 		conf.env.append_unique('DEFINES', [
 			'WIN32=1', '_WIN32=1',
@@ -383,7 +393,15 @@ def check_deps(conf):
 	if conf.options.TESTS:
 		return
 
-	if conf.env.DEST_OS != 'android':
+	if conf.env.DEST_OS == 'vita':
+		# no pkg-config for the target; VitaSDK puts everything in one sysroot
+		conf.check(lib='SDL2', uselib_store='SDL2')
+		conf.check(lib='freetype', uselib_store='FT2')
+		conf.check(lib='jpeg', uselib_store='JPEG', define_name='HAVE_JPEG')
+		conf.check(lib='png', uselib_store='PNG', define_name='HAVE_PNG')
+		conf.check(lib='z', uselib_store='ZLIB', define_name='HAVE_ZLIB')
+		conf.check(lib='opus', uselib_store='OPUS')
+	elif conf.env.DEST_OS != 'android':
 		if conf.env.DEST_OS != 'win32':
 			if conf.options.SDL:
 				conf.check_cfg(package='sdl2', uselib_store='SDL2', args=['--cflags', '--libs'])
@@ -433,6 +451,20 @@ def check_deps(conf):
 
 		# conf.multicheck(*a, run_all_tests = True, mandatory = True)
 
+def move_vita_libs_to_launcher(conf):
+	# VitaSDK only ships non-PIC static libraries, which can't be linked into
+	# engine modules. Everything is linked into the launcher executable instead
+	# and modules import from it at load time, so drop them from the modules.
+	libs = []
+	for key in list(conf.env.keys()):
+		# skip waf's own '-l%s'-style format strings and markers
+		if key in ('LIB_ST', 'STLIB_ST', 'STLIB_MARKER', 'SHLIB_MARKER'):
+			continue
+		if (key.startswith('LIB_') or key.startswith('STLIB_')) and isinstance(conf.env[key], list):
+			libs += conf.env[key]
+			conf.env[key] = []
+	conf.env.VITA_LAUNCHER_LIBS = sorted(set(libs))
+
 def configure(conf):
 	conf.load('fwgslib reconfigure compiler_optimizations')
 
@@ -458,6 +490,10 @@ def configure(conf):
 		conf.load('force_32bit')
 
 	define_platform(conf)
+
+	if conf.env.DEST_OS == 'vita' and 'launcher_main' in projects['game']:
+		# replaced by the Vita launcher, which embeds the module loader
+		projects['game'].remove('launcher_main')
 
 	if conf.env.TOGLES:
 		projects['game'] += ['togles']
@@ -495,6 +531,10 @@ def configure(conf):
 
 	cflags, linkflags = conf.get_optimization_flags()
 
+	if conf.env.DEST_OS == 'vita':
+		# module imports are resolved at load time, see xcompile.py
+		linkflags = [f for f in linkflags if f != '-Wl,--no-undefined']
+
 
 	flags = []
 
@@ -526,8 +566,19 @@ def configure(conf):
 	elif conf.env.DEST_CPU in ['arm', 'aarch64']:
 		flags += ['-fsigned-char']
 
-	if conf.env.DEST_CPU == 'arm':
+	if conf.env.DEST_CPU == 'arm' and conf.env.DEST_OS != 'vita':
 		flags += ['-march=armv7-a', '-mfpu=neon-vfpv4']
+
+	if conf.env.DEST_OS == 'vita':
+		vitasdk = conf.environ['VITASDK']
+		flags += [
+			'-I'+os.path.join(vitasdk, 'arm-vita-eabi', 'include', 'SDL2'),
+			'-I'+os.path.join(vitasdk, 'arm-vita-eabi', 'include', 'freetype2'),
+			'-I'+os.path.abspath('.')+'/common/vita',
+			'-D_GNU_SOURCE',
+			'-include', os.path.abspath('.')+'/common/vita/vita_compat.h',
+			'-ffunction-sections', '-fdata-sections'
+		]
 
 	if conf.env.DEST_OS == 'freebsd':
 		linkflags += ['-lexecinfo']
@@ -605,6 +656,9 @@ def configure(conf):
 
 	check_deps( conf )
 
+	if conf.env.DEST_OS == 'vita':
+		move_vita_libs_to_launcher(conf)
+
 	# indicate if we are packaging for Linux/BSD
 	if conf.env.DEST_OS != 'android':
 		conf.env.LIBDIR = conf.env.PREFIX+'/bin/'
@@ -638,6 +692,9 @@ def build(bld):
 
 	if bld.env.OPUS or bld.env.DEST_OS == 'android':
 		projects['game'] += ['engine/voice_codecs/opus']
+
+	if bld.env.DEST_OS == 'vita' and 'launcher_main' in projects['game']:
+		projects['game'].remove('launcher_main')
 
 	if bld.env.TESTS:
 		bld.add_subproject(projects['tests'])

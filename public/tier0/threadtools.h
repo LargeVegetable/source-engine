@@ -233,6 +233,17 @@ inline void ThreadPause()
 {
 #if defined( COMPILER_PS3 )
 	__db16cyc();
+#elif defined( PLATFORM_VITA )
+	// sched_yield() is a 1 ms sleep on the Vita (pthread-embedded calls
+	// pte_osThreadSleep( 1 )), so every spin wait, lock-free list op (TSList
+	// Detach pauses unconditionally) and ParallelProcess wait slept: server
+	// partition queries cost ~3 ms each. Use the CPU hint like other
+	// platforms, and really yield now and then so a lock holder sharing the
+	// core can run (the counter is racy across threads, which is harmless)
+	static unsigned s_nVitaPauses;
+	__asm__ __volatile__( "yield" ::: "memory" );
+	if ( ( ++s_nVitaPauses & 255 ) == 0 )
+		usleep( 50 );
 #elif defined( COMPILER_GCC ) && (defined( __i386__ ) || defined( __x86_64__ ))
 	__asm __volatile( "pause" );
 #elif defined( POSIX )
@@ -2304,6 +2315,10 @@ inline CThreadMutex::CThreadMutex()
 inline CThreadMutex::~CThreadMutex()
 {
 	pthread_mutex_destroy( &m_Mutex );
+	// pthreads-embedded (Vita) allocates the attribute object: without this,
+	// every CThreadMutex leaked it, one per thread pool job (CJob has one),
+	// ~7 KB/s of heap while idle (found with a heap tracker)
+	pthread_mutexattr_destroy( &m_Attr );
 }
 
 //---------------------------------------------------------

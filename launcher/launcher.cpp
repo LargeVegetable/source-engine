@@ -906,7 +906,13 @@ const char *CSourceAppSystemGroup::DetermineDefaultGame()
 
 int MessageBox( HWND hWnd, const char *message, const char *header, unsigned uType )
 {
+#ifdef PLATFORM_VITA
+	// SDL's dialog never shows from the engine thread and blocks it; the
+	// message is in the log already
+	(void)message; (void)header;
+#else
 	SDL_ShowSimpleMessageBox( 0, header, message, GetAssertDialogParent() );
+#endif
 	return 0;
 }
 
@@ -952,7 +958,8 @@ bool GrabSourceMutex()
 	CRC32_ProcessBuffer( &gameCRC, (void *)pchGameParam, Q_strlen( pchGameParam ) );
 	CRC32_Final( &gameCRC );
 
-#ifdef ANDROID
+#if defined( ANDROID ) || defined( PLATFORM_VITA )
+	// single instance by platform design; there's no /tmp to lock in either
 	return true;
 #elif defined (LINUX) || defined(PLATFORM_BSD)
 	/*
@@ -1205,7 +1212,7 @@ DLL_EXPORT int LauncherMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR
 DLL_EXPORT int LauncherMain( int argc, char **argv )
 #endif
 {
-#if (defined(LINUX) || defined(PLATFORM_BSD)) && !defined ANDROID
+#if (defined(LINUX) || defined(PLATFORM_BSD)) && !defined ANDROID && !defined PLATFORM_VITA
 	// Temporary fix to stop us from crashing in printf/sscanf functions that don't expect
 	//  localization to mess with your "." and "," float seperators. Mac OSX also sets LANG
 	//  to en_US.UTF-8 before starting up (in info.plist I believe).
@@ -1232,7 +1239,7 @@ DLL_EXPORT int LauncherMain( int argc, char **argv )
 	Msg("SDL version: %d.%d.%d rev: %s\n", (int)ver.major, (int)ver.minor, (int)ver.patch, SDL_GetRevision());
 #endif
 
-#if (defined LINUX || defined PLATFORM_BSD) && defined USE_SDL && defined TOGLES && !defined ANDROID
+#if (defined LINUX || defined PLATFORM_BSD) && defined USE_SDL && defined TOGLES && !defined ANDROID && !defined PLATFORM_VITA
 	SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
 #endif
 

@@ -55,9 +55,12 @@ private:
 
 	unsigned m_maxSize;
 	unsigned m_alignment;
-#ifdef _WIN32
+#if defined( _WIN32 ) || defined( PLATFORM_VITA )
 	unsigned m_commitSize;
 	unsigned m_minCommit;
+#endif
+#ifdef PLATFORM_VITA
+	int m_reserveBlock; // kubridge reservation, or -1 when allocated outright
 #endif
 #ifdef _X360
 	bool m_bPhysical;

@@ -72,6 +72,7 @@ def build(bld):
 		'CreateMultiplayerGameServerPage.cpp',
 		'OptionsDialog_Xbox.cpp',
 		'ControllerDialog.cpp',
+		'VitaMenu.cpp',
 		'matchmaking/achievementsdialog.cpp',
 		'matchmaking/basedialog.cpp',
 		'matchmaking/dialogmenu.cpp',

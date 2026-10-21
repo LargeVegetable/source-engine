@@ -45,6 +45,10 @@
 #include <time.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
+#ifdef PLATFORM_VITA
+void VitaDirCache_Clear(); // filesystem_stdio.cpp
+#endif
+
 #include "tier0/memdbgon.h"
 
 
@@ -3776,6 +3780,11 @@ bool CBaseFileSystem::IsFileWritable( char const *pFileName, char const *pPathID
 		{
 #ifdef WIN32
 			if( buf.st_mode & _S_IWRITE )
+#elif defined( PLATFORM_VITA )
+			// the Vita's stat reports no write bits for memory card files
+			// (config.cfg was never saved: "is read-only"); a real failure
+			// still shows up when the file is opened for writing
+			if( true )
 #elif defined (LINUX) && !defined (ANDROID) 
 			if( buf.st_mode & S_IWRITE )
 #elif ANDROID
@@ -3800,6 +3809,8 @@ bool CBaseFileSystem::IsFileWritable( char const *pFileName, char const *pPathID
 		{
 #ifdef WIN32
 			if ( buf.st_mode & _S_IWRITE )
+#elif defined( PLATFORM_VITA )
+			if ( true )	// see above
 #elif defined (LINUX) && !defined (ANDROID) 
 			if ( buf.st_mode & S_IWRITE )
 #elif ANDROID
@@ -3967,6 +3978,9 @@ void CBaseFileSystem::CreateDirHierarchy( const char *pRelativePathT, const char
 	_mkdir( szScratchFileName );
 #elif defined( POSIX )
 	mkdir( szScratchFileName, S_IRWXU |  S_IRGRP |  S_IROTH );
+#endif
+#ifdef PLATFORM_VITA
+	VitaDirCache_Clear();
 #endif
 }
 
@@ -4659,6 +4673,9 @@ void CBaseFileSystem::RemoveFile( char const* pRelativePath, const char *pathID 
 		ComputeFullWritePath( szScratchFileName, sizeof( szScratchFileName ), pRelativePath, pathID );
 	}
 	int fail = unlink( szScratchFileName );
+#ifdef PLATFORM_VITA
+	VitaDirCache_Clear();
+#endif
 	if ( fail != 0 )
 	{
 		Warning( FILESYSTEM_WARNING, "Unable to remove %s!\n", szScratchFileName );
@@ -4718,6 +4735,9 @@ bool CBaseFileSystem::RenameFile( char const *pOldPath, char const *pNewPath, co
 
 	// Now copy the file over
 	int fail = rename( szScratchFileName, pNewFileName );
+#ifdef PLATFORM_VITA
+	VitaDirCache_Clear();
+#endif
 	if (fail != 0)
 	{
 		Warning( FILESYSTEM_WARNING, "Unable to rename %s to %s!\n", szScratchFileName, pNewFileName );

@@ -41,7 +41,13 @@ void GLMRendererInfo::Init( GLMRendererInfoFields *info )
         m_info.m_ati = true;
         m_info.m_atiNewer = true;
 
+#ifdef PLATFORM_VITA
+        // vitaGL applies GL_FRAMEBUFFER_SRGB only to its fixed-function
+        // shaders: use ToGL's in-shader sRGB encode (flSRGBWrite) instead
+        m_info.m_hasGammaWrites = false;
+#else
         m_info.m_hasGammaWrites = true;
+#endif
 	m_info.m_cantAttachSRGB = false;
 
         // If you haven't created a GL context by now (and initialized gGL), you're about to crash.

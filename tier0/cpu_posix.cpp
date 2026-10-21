@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#ifdef LINUX
+#if defined(PLATFORM_VITA)
+// no sysctl; frequency lookups below fall back to a constant
+#elif defined(LINUX)
 #include <linux/sysctl.h>
 #else
 #include <sys/sysctl.h>

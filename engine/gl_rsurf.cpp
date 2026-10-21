@@ -52,6 +52,8 @@
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
+#include "vita_perf.h"
+
 #include "tier0/memdbgon.h"
 
 #define BACKFACE_EPSILON	-0.01f
@@ -1060,6 +1062,10 @@ void Shader_DrawChainsStatic( const CMSurfaceSortList &sortList, int nSortGroup,
 				pRenderContext->Draw( MATERIAL_TRIANGLES, batch.firstIndex, batch.numIndex );
 #else
 //				pMesh->Draw( batch.firstIndex, batch.numIndex );
+#ifdef PLATFORM_VITA
+				if ( !bShadowDepth )
+					so_perf_count( VITA_PERF_WORLD_DRAW, 0 );	// one per (material, lightmap page) batch
+#endif
 				pRenderContext->DrawBatch( batch.firstIndex, batch.numIndex );
 #endif
 			}

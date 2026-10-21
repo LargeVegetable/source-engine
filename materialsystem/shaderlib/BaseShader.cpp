@@ -18,6 +18,7 @@
 #include "tier1/strtools.h"
 #include "convar.h"
 #include "tier0/vprof.h"
+#include "vtf/vtf.h"
 
 // NOTE: This must be the last include file in a .cpp file!
 #include "tier0/memdbgon.h"
@@ -33,7 +34,11 @@ IShaderDynamicAPI *CBaseShader::s_pShaderAPI;
 IShaderInit *CBaseShader::s_pShaderInit;
 int CBaseShader::s_nModulationFlags;
 CMeshBuilder *CBaseShader::s_pMeshBuilder;
+#ifdef PLATFORM_VITA
+static ConVar mat_fullbright( "mat_fullbright","0", FCVAR_NONE );	// not a cheat on the Vita (engine/matsys_interface.cpp)
+#else
 static ConVar mat_fullbright( "mat_fullbright","0", FCVAR_CHEAT );
+#endif
 
 bool g_shaderConfigDumpEnable = false; //true;		//DO NOT CHECK IN ENABLED FIXME
 
@@ -293,6 +298,13 @@ void CBaseShader::LoadTexture( int nTextureVar, int nAdditionalCreationFlags /* 
 	IMaterialVar* pNameVar = s_ppParams[nTextureVar];
 	if( pNameVar && pNameVar->IsDefined() )
 	{
+#ifdef PLATFORM_VITA
+		// Picmip averages away the thin holes of cut-out textures (chain-link
+		// fences drew solid): ctexture.cpp gives an alpha-tested material's
+		// base texture the higher mat_picmip_alphatest_min_size floor
+		if ( nTextureVar == BASETEXTURE && ( s_ppParams[FLAGS]->GetIntValue() & MATERIAL_VAR_ALPHATEST ) )
+			nAdditionalCreationFlags |= TEXTUREFLAGS_UNUSED_00400000;	// TEXTUREFLAGS_VITA_ALPHATEST
+#endif
 		s_pShaderInit->LoadTexture( pNameVar, s_pTextureGroupName, nAdditionalCreationFlags );
 	}
 }

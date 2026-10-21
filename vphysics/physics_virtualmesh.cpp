@@ -306,7 +306,17 @@ public:
 	CPhysCollideVirtualMesh(const virtualmeshparams_t &params) : m_params(params), m_hMemory( INVALID_MEMHANDLE ), m_ledgeCount( 0 )
 	{
 		m_pHull = NULL;
+#ifdef PLATFORM_VITA
+		// Maps without a physdisp lump (HL2's) would get displacement outer
+		// hulls built here with qhull. Not on the Vita: tried
+		// with qhull working, the physics step cost more with the hulls
+		// (4-5 ms per awake prop on terrain vs 2-3 without; level-load
+		// settling 180 ms vs 125) and building 70 of them added ~1 s to a
+		// load. Without a hull, collision uses the displacement triangles
+		if ( false )
+#else
 		if ( params.buildOuterHull )
+#endif
 		{
 			BuildBoundingLedge();
 		}
@@ -473,6 +483,17 @@ virtualmeshhull_t *CPhysCollideVirtualMesh::CreateMeshBoundingHull( const virtua
 		if ( pSurface )
 		{
 			const IVP_Compact_Ledge *pLedge = pSurface->get_compact_ledge_tree_root()->get_compact_hull();
+			if ( !pLedge )
+			{
+				// convex hull failed: no outer hull, queries use the triangles
+#ifdef PLATFORM_VITA
+				static int s_nVitaHullFailures = 0;
+				if ( s_nVitaHullFailures++ < 4 )
+					Warning( "[vita] displacement hull build failed (%d triangles); collision uses the triangles\n", list.triangleCount );
+#endif
+				ivp_free_aligned(pSurface);
+				return NULL;
+			}
 			if ( CVPhysicsVirtualMeshWriter::LedgeCanBePacked(pLedge, list) )
 			{
 				pHull = CVPhysicsVirtualMeshWriter::CreatePackedHullFromLedges( list, &pLedge, 1 );
@@ -483,10 +504,16 @@ virtualmeshhull_t *CPhysCollideVirtualMesh::CreateMeshBoundingHull( const virtua
 				IVP_Compact_Surface *pSurface0 = CreateBoundingSurfaceFromRange( list, 0, list.indexCount/2 );
 				IVP_Compact_Surface *pSurface1 = CreateBoundingSurfaceFromRange( list, list.indexCount/2, list.indexCount/2 );
 
-				const IVP_Compact_Ledge *pLedges[2] = {pSurface0->get_compact_ledge_tree_root()->get_compact_hull(), pSurface1->get_compact_ledge_tree_root()->get_compact_hull()};
-				pHull = CVPhysicsVirtualMeshWriter::CreatePackedHullFromLedges( list, pLedges, 2 );
-				ivp_free_aligned(pSurface0);
-				ivp_free_aligned(pSurface1);
+				if ( pSurface0 && pSurface1 )
+				{
+					const IVP_Compact_Ledge *pLedges[2] = {pSurface0->get_compact_ledge_tree_root()->get_compact_hull(), pSurface1->get_compact_ledge_tree_root()->get_compact_hull()};
+					if ( pLedges[0] && pLedges[1] )
+						pHull = CVPhysicsVirtualMeshWriter::CreatePackedHullFromLedges( list, pLedges, 2 );
+				}
+				if ( pSurface0 )
+					ivp_free_aligned(pSurface0);
+				if ( pSurface1 )
+					ivp_free_aligned(pSurface1);
 			}
 			ivp_free_aligned(pSurface);
 		}

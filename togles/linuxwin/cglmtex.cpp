@@ -34,6 +34,7 @@ extern "C" {
 
 #include "tier0/icommandline.h"
 #include "glmtexinlines.h"
+#include "vita_perf.h"
 
 // memdbgon -must- be the last include file in a .cpp file.
 #include "tier0/memdbgon.h"
@@ -717,8 +718,17 @@ ConVar gl_minimize_rt_tex ( "gl_minimize_rt_tex", "0" );	// if 1, set the GL_TEX
 ConVar gl_minimize_all_tex ( "gl_minimize_all_tex", "1" );	// if 1, set the GL_TEXTURE_MINIMIZE_STORAGE_APPLE texture parameter to cut off mipmaps for textures which are unmipped
 ConVar gl_minimize_tex_log ( "gl_minimize_tex_log", "0" );	// if 1, printf the names of the tex that got minimized
 
+#ifdef PLATFORM_VITA
+// storage of all live textures, logged with large textures; exported for the
+// launcher's 10 s memory line (dlsym)
+extern "C" __attribute__(( visibility( "default" ) )) int64 g_nVitaTexBytes;
+extern "C" void vglTexInPlaceUpdates( GLenum target, GLboolean enable );	// vitaGL fork
+int64 g_nVitaTexBytes = 0;
+#endif
+
 CGLMTex::CGLMTex( GLMContext *ctx, GLMTexLayout *layout, uint levels, const char *debugLabel )
 {
+	VITA_CHECK_RENDER_THREAD( "texture created" );
 #if GLMDEBUG
 	m_pPrevTex = NULL;
 	m_pNextTex = g_pFirstCGMLTex;
@@ -789,6 +799,26 @@ CGLMTex::CGLMTex( GLMContext *ctx, GLMTexLayout *layout, uint levels, const char
 	
 	// clone the debug label if there is one.
 	m_debugLabel = debugLabel ? strdup(debugLabel) : NULL;
+#ifdef PLATFORM_VITA
+	// Lightmap pages are locked whole while only the surfaces being updated
+	// (dynamic lights, light styles) are rewritten, and Unlock uploads the
+	// whole page. Freeing the CPU copy after each unlock meant the next lock
+	// got a fresh uninitialised buffer, and the rest of the page was uploaded
+	// from it: black or rainbow blocks on walls and windows. Keep the copy
+	// (512x256 RGBA, 512 KB per page)
+	m_bVitaKeepBacking = m_debugLabel && !strncmp( m_debugLabel, "[lightmap", 9 );
+#endif
+
+#ifdef PLATFORM_VITA
+	// GPU memory is the scarce resource on Vita: keep a running total of
+	// texture storage and name the large textures
+	g_nVitaTexBytes += m_layout->m_storageTotalSize;
+	if ( m_layout->m_storageTotalSize >= 1024 * 1024 )
+	{
+		Msg( "[vita] large texture %s: %s, %d KB (textures now %d KB)\n", m_debugLabel ? m_debugLabel : "-",
+			m_layout->m_layoutSummary, m_layout->m_storageTotalSize / 1024, (int)( g_nVitaTexBytes / 1024 ) );
+	}
+#endif
 
 	// if tex is MSAA renderable, make an RBO, else zero the RBO name and dirty bit
 	if (layout->m_key.m_texFlags & kGLMTexMultisampled)
@@ -974,6 +1004,9 @@ CGLMTex::CGLMTex( GLMContext *ctx, GLMTexLayout *layout, uint levels, const char
 
 CGLMTex::~CGLMTex( )
 {
+#ifdef PLATFORM_VITA
+	g_nVitaTexBytes -= m_layout->m_storageTotalSize;
+#endif
 #if GLMDEBUG
 	if ( m_pPrevTex )
 	{
@@ -1182,6 +1215,12 @@ GLubyte *CGLMTex::ReadTexels( GLMTexLockDesc *desc, bool readWholeSlice, bool re
 					GLenum dataType = format->m_glDataType;
 
 					convert_texture(fmt, 0, 0, fmt, dataType, NULL);
+#ifdef PLATFORM_VITA
+					// vitaGL reads back RGBA, the order the engine keeps A8R8G8B8 in
+					// (see WriteTexels)
+					if( fmt == GL_BGRA ) fmt = GL_RGBA;
+					if( fmt == GL_BGR ) fmt = GL_RGB;
+#endif
 					gGL->glReadPixels(0, 0, m_layout->m_slices[ desc->m_sliceIndex ].m_xSize, m_layout->m_slices[ desc->m_sliceIndex ].m_ySize, fmt, dataType, data);
 
 					gGL->glBindFramebuffer(GL_READ_FRAMEBUFFER, Rfbo);
@@ -3329,11 +3368,18 @@ static inline halffloat_t float_f2h(float f)
 
 void convert_texture( GLenum &internalformat, GLsizei width, GLsizei height, GLenum &format, GLenum &type, void *data )
 {
+#ifdef PLATFORM_VITA
+	// vitaGL takes GL_BGRA/GL_BGR sources and swizzles them itself, so no
+	// relabeling here: WriteTexels picks the source order per D3D format
+	if( internalformat == GL_SRGB8 && ( format == GL_RGBA || format == GL_BGRA ) )
+		internalformat = GL_SRGB8_ALPHA8;
+#else
 	if( format == GL_BGRA ) format = GL_RGBA;
 	if( format == GL_BGR ) format = GL_RGB;
 
 	if( internalformat == GL_SRGB8 && format == GL_RGBA )
 		internalformat = GL_SRGB8_ALPHA8;
+#endif
 
 	if( format == GL_LUMINANCE || format == GL_LUMINANCE_ALPHA )
 		internalformat = format;
@@ -3505,6 +3551,7 @@ ConVar	gl_enabletexsubimage( "gl_enabletexsubimage", "1" );
 
 void CGLMTex::WriteTexels( GLMTexLockDesc *desc, bool writeWholeSlice, bool noDataWrite )
 {
+	VITA_PERF_SCOPE( VITA_PERF_TEX_UPLOAD );
 	//if ( m_nBindlessHashNumEntries )
 	//	return;
 	
@@ -3549,9 +3596,36 @@ void CGLMTex::WriteTexels( GLMTexLockDesc *desc, bool writeWholeSlice, bool noDa
 	GLMTexFormatDesc *format = m_layout->m_format;
 	
 	GLenum target		= m_layout->m_key.m_texGLTarget;
-	GLenum glDataFormat	= format->m_glDataFormat;				// this could change if expansion kicks in 
+#ifdef PLATFORM_VITA
+	// lightmap pages are updated rect by rect every frame a dynamic light
+	// touches them; vitaGL would otherwise copy the whole page out of GPU
+	// memory before each update to a texture drawn in recent frames
+	if ( m_bVitaKeepBacking )
+		vglTexInPlaceUpdates( target, GL_TRUE );
+#endif
+	GLenum glDataFormat	= format->m_glDataFormat;				// this could change if expansion kicks in
 	GLenum glDataType	= format->m_glDataType;
-	
+#ifdef PLATFORM_VITA
+	// Under TOGLES the engine keeps A8R8G8B8 and R8G8B8 texels in R,G,B(,A)
+	// byte order (ImageLoader::D3DFormatToImageFormat maps them to RGBA8888
+	// and RGB888, and lightmaps are written through that format). Given the
+	// table's GL_BGRA/GL_BGR, vitaGL swizzled them, so red and blue swapped:
+	// orange light showed blue. X8R8G8B8 (BGRX8888) and the 16-bit formats
+	// really are B,G,R and keep the table's format
+	switch ( m_layout->m_format->m_d3dFormat )
+	{
+	case D3DFMT_A8R8G8B8:
+	case D3DFMT_Q8W8V8U8:
+		glDataFormat = GL_RGBA;
+		break;
+	case D3DFMT_R8G8B8:
+		glDataFormat = GL_RGB;
+		break;
+	default:
+		break;
+	}
+#endif
+
 	GLMTexLayoutSlice *slice = &m_layout->m_slices[ desc->m_sliceIndex ];
 
 	void *sliceAddress = NULL;
@@ -3575,6 +3649,13 @@ void CGLMTex::WriteTexels( GLMTexLockDesc *desc, bool writeWholeSlice, bool noDa
 	// (mechanism not policy)
 	
 	GLenum intformat = (m_layout->m_key.m_texFlags & kGLMTexSRGB) ? format->m_glIntFormatSRGB : format->m_glIntFormat;
+#ifdef PLATFORM_VITA
+	// Render targets hold already-encoded pixels (shaders encode sRGB
+	// themselves, see flSRGBWrite); an sRGB texture would make vitaGL decode
+	// them again whenever they're sampled, including the blit to the screen
+	if ( m_layout->m_key.m_texFlags & kGLMTexRenderable )
+		intformat = format->m_glIntFormat;
+#endif
 	if (CommandLine()->FindParm("-disable_srgbtex"))
 	{
 		// force non srgb flavor - experiment to make ATI r600 happy on 10.5.8 (maybe x1600 too!)
@@ -3676,8 +3757,17 @@ void CGLMTex::WriteTexels( GLMTexLockDesc *desc, bool writeWholeSlice, bool noDa
 					if( !m_mapped )
 					{
 						gGL->glPixelStorei( GL_UNPACK_ROW_LENGTH, slice->m_xSize );			// in pixels
+#ifdef PLATFORM_VITA
+						// vitaGL has GL_UNPACK_ROW_LENGTH but ignores GL_UNPACK_SKIP_PIXELS
+						// and GL_UNPACK_SKIP_ROWS, so start the source at the box corner
+						// here; otherwise every partial update (font glyphs, lightmap
+						// patches) uploads texels from the top-left of the slice
+						const int nSrcBpp = expandTemp ? 3 : m_layout->m_format->m_bytesPerSquareChunk;
+						sliceAddress = (char *)sliceAddress + ( writeBox.ymin * slice->m_xSize + writeBox.xmin ) * nSrcBpp;
+#else
 						gGL->glPixelStorei( GL_UNPACK_SKIP_PIXELS, writeBox.xmin );		// in pixels
 						gGL->glPixelStorei( GL_UNPACK_SKIP_ROWS, writeBox.ymin );		// in pixels
+#endif
 
 						convert_texture(intformat, writeBox.xmax - writeBox.xmin, writeBox.ymax - writeBox.ymin, glDataFormat, glDataType, sliceAddress);
 
@@ -3693,8 +3783,10 @@ void CGLMTex::WriteTexels( GLMTexLockDesc *desc, bool writeWholeSlice, bool noDa
 										);
 
 						gGL->glPixelStorei( GL_UNPACK_ROW_LENGTH, 0 );
+#ifndef PLATFORM_VITA
 						gGL->glPixelStorei( GL_UNPACK_SKIP_PIXELS, 0 );
 						gGL->glPixelStorei( GL_UNPACK_SKIP_ROWS, 0 );
+#endif
 					}
 					else
 					{
@@ -4080,7 +4172,11 @@ void CGLMTex::Unlock( GLMTexLockParams *params )
 		// because it reuploads the whole thing each slice; we only use 3D textures
 		// for the 32x32x32 colorpsace conversion lookups and debugging the problem
 		// would not save any more memory.
+#ifdef PLATFORM_VITA
+		if ( !m_texClientStorage && ( m_texGLTarget == GL_TEXTURE_2D ) && m_backing && !m_bVitaKeepBacking )
+#else
 		if ( !m_texClientStorage && ( m_texGLTarget == GL_TEXTURE_2D ) && m_backing )
+#endif
 		{
 			free(m_backing);
 			m_backing = NULL;

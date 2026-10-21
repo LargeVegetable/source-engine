@@ -309,6 +309,28 @@ bool foundLibraryWithPrefix( char *pModuleAbsolutePath, size_t AbsolutePathSize,
 
 #endif
 
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// Engine modules ship in the app's own bin dir rather than next to the game
+// data, and are all named lib<name>.so. Maps any module name or path the
+// engine asks for onto that.
+//-----------------------------------------------------------------------------
+static bool VitaFindModule( char *pOut, size_t nOutSize, const char *pModuleName )
+{
+	char name[MAX_PATH];
+	V_StripExtension( V_UnqualifiedFileName( pModuleName ), name, sizeof( name ) );
+	const char *pBase = !V_strncmp( name, "lib", 3 ) ? name + 3 : name;
+
+	struct stat statBuf;
+	V_snprintf( pOut, nOutSize, "app0:bin/lib%s" DLL_EXT_STRING, pBase );
+	if ( stat( pOut, &statBuf ) == 0 )
+		return true;
+
+	V_snprintf( pOut, nOutSize, "app0:bin/%s" DLL_EXT_STRING, pBase );
+	return stat( pOut, &statBuf ) == 0;
+}
+#endif
+
 //-----------------------------------------------------------------------------
 // Purpose: Loads a DLL/component from disk and returns a handle to it
 // Input  : *pModuleName - filename of the component
@@ -366,6 +388,12 @@ CSysModule *Sys_LoadModule( const char *pModuleName, Sys_Flags flags /* = SYS_NO
 			return reinterpret_cast<CSysModule *>(hDLL);
 		}
 
+#elif defined( PLATFORM_VITA )
+		if( !VitaFindModule( szAbsoluteModuleName, sizeof( szAbsoluteModuleName ), pModuleName ) )
+		{
+			Warning("Can't find module - %s\n", pModuleName);
+			return reinterpret_cast<CSysModule *>(hDLL);
+		}
 #elif defined( POSIX )
 		if( !foundLibraryWithPrefix(szAbsoluteModuleName, sizeof(szAbsoluteModuleName), szCwd, pModuleName) )
 		{
@@ -388,6 +416,10 @@ CSysModule *Sys_LoadModule( const char *pModuleName, Sys_Flags flags /* = SYS_NO
 
 		struct stat statBuf;
 		bool bFound = stat(szModuleName, &statBuf) == 0;
+#ifdef PLATFORM_VITA
+		if( !bFound )
+			bFound = VitaFindModule( szModuleName, sizeof( szModuleName ), pModuleName );
+#endif
 
 		if( !bFound )
 		{
@@ -396,6 +428,10 @@ CSysModule *Sys_LoadModule( const char *pModuleName, Sys_Flags flags /* = SYS_NO
 		}
 
 		Msg("LoadLibrary: path: %s\n", szModuleName);
+#ifdef PLATFORM_VITA
+		// load the file that was found, not the path asked for
+		hDLL = Sys_LoadLibrary( szModuleName, flags );
+#endif
 #endif
 	}
 

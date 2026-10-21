@@ -76,8 +76,15 @@ CFontTextureCache::~CFontTextureCache()
 //-----------------------------------------------------------------------------
 // Purpose: Resets the cache
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+extern unsigned g_nVitaGlyphGeneration;	// MatSystemSurface.cpp: its glyph cache follows this one
+#endif
+
 void CFontTextureCache::Clear()
 {
+#ifdef PLATFORM_VITA
+	g_nVitaGlyphGeneration++;
+#endif
 	// remove all existing data
 	m_CharCache.RemoveAll();
 	m_PageList.RemoveAll();

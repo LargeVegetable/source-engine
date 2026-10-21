@@ -122,6 +122,9 @@ public:
 	virtual void DrawTexturedSubRect( int x0, int y0, int x1, int y1, float texs0, float text0, float texs1, float text1 );
 
 	virtual void DrawTexturedPolygon(int n, vgui::Vertex_t *pVertices, bool bClipVertices = true );
+#ifdef PLATFORM_VITA
+	virtual void DrawTexturedSubRectArray( const int *pRects, const float *pTex, int nRects );
+#endif
 
 	virtual void DrawPrintText(const wchar_t *text, int textLen, FontDrawType_t drawType = FONT_DRAW_DEFAULT);
 	virtual void DrawUnicodeChar(wchar_t wch, FontDrawType_t drawType = FONT_DRAW_DEFAULT );

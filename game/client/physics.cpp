@@ -177,7 +177,13 @@ void PhysicsLevelInit( void )
 	physenv->SetGravity( Vector(0, 0, -GetCurrentGravity() ) );
 	// 15 ms per tick
 	// NOTE: Always run client physics at this rate - helps keep ragdolls stable
+#ifdef PLATFORM_VITA
+	// The original Xbox's client physics step (ragdolls, client debris; on
+	// the main thread here): 25 ms instead of 15
+	physenv->SetSimulationTimestep( DEFAULT_XBOX_CLIENT_VPHYSICS_TICK );
+#else
 	physenv->SetSimulationTimestep( IsXbox() ? DEFAULT_XBOX_CLIENT_VPHYSICS_TICK : DEFAULT_TICK_INTERVAL );
+#endif
 	physenv->SetCollisionEventHandler( &g_Collisions );
 	physenv->SetCollisionSolver( &g_Collisions );
 

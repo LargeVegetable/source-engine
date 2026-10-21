@@ -34,6 +34,8 @@
 #include "tier0/vcrmode.h"
 #include "pushentity.h"
 
+#include "vita_perf.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -907,6 +909,36 @@ CBaseEntity *CPhysicsPushedEntities::PerformLinearPush( CBaseEntity *pRoot, floa
 //			to run it's game code.
 //			All other entity thinking is done during worldspawn's think
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+// This server tick's entity thinks: how many, and the three longest (class,
+// name, ms), for the slow server tick line (gameinterface.cpp declares the
+// same struct, and resets them each tick)
+struct VitaThinkTop_t
+{
+	float m_flMs;
+	char m_szClass[32];
+	char m_szName[40];
+};
+VitaThinkTop_t g_VitaThinkTop[3];
+int g_nVitaThinks = 0;
+
+static void VitaNoteThink( CBaseEntity *pEntity, float flMs )
+{
+	g_nVitaThinks++;
+	if ( flMs <= g_VitaThinkTop[2].m_flMs )
+		return;
+	int i = 2;
+	while ( i > 0 && flMs > g_VitaThinkTop[i - 1].m_flMs )
+	{
+		g_VitaThinkTop[i] = g_VitaThinkTop[i - 1];
+		i--;
+	}
+	g_VitaThinkTop[i].m_flMs = flMs;
+	V_strncpy( g_VitaThinkTop[i].m_szClass, pEntity->GetClassname(), sizeof( g_VitaThinkTop[i].m_szClass ) );
+	V_strncpy( g_VitaThinkTop[i].m_szName, pEntity->GetDebugName(), sizeof( g_VitaThinkTop[i].m_szName ) );
+}
+#endif
+
 void CBaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 {
 	VPROF_ENTER_SCOPE( ( !vprof_scope_entity_thinks.GetBool() ) ? 
@@ -943,6 +975,9 @@ void CBaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 	{
 		// calculate running time of the AI in milliseconds
 		float time = ( engine->Time() - startTime ) * 1000.0f;
+#ifdef PLATFORM_VITA
+		VitaNoteThink( this, time );
+#endif
 		if ( time > thinkLimit )
 		{
 #if defined( _XBOX ) && !defined( _RETAIL )
@@ -954,6 +989,17 @@ void CBaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 #endif
 			// If its an NPC print out the shedule/task that took so long
 			CAI_BaseNPC *pNPC = MyNPCPointer();
+#ifdef PLATFORM_VITA
+			// on all the time on the Vita (think_limit 15, gameinterface.cpp):
+			// at most 100 reports a run
+			static int s_nVitaThinkReports = 0;
+			if ( ++s_nVitaThinkReports > 100 )
+				;
+			else if (pNPC && pNPC->GetCurSchedule())
+				pNPC->ReportOverThinkLimit( time );
+			else
+				Msg( "[vita] %s (%s, %s) thinking for %.1f ms\n", GetClassname(), GetDebugName(), typeid(*this).name(), time );
+#else
 			if (pNPC && pNPC->GetCurSchedule())
 			{
 				pNPC->ReportOverThinkLimit( time );
@@ -968,6 +1014,7 @@ void CBaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 #error "typeinfo"
 #endif
 			}
+#endif
 		}
 	}
 
@@ -1939,8 +1986,122 @@ void CBaseEntity::PhysicsStepRunTimestep( float timestep )
 // After this long, if a player isn't updating, then return it's projectiles to server control
 #define PLAYER_PACKETS_STOPPED_SO_RETURN_TO_PHYSICS_TIME 1.0f
 
+#ifdef PLATFORM_VITA
+// Server time by section, logged every 10 s: entity thinks by class, game
+// systems by name and the fixed GameFrame steps (VitaProfileScope users in
+// gameinterface.cpp and igamesystem.cpp). Names are copied: classname
+// strings are freed on level changes.
+struct VitaProfileEntry_t
+{
+	const char *pszPrefixKey;	// last pointers seen for this name (fast path)
+	const char *pszNameKey;
+	char szName[48];
+	uint64 nTime;
+	int nCount;
+};
+static VitaProfileEntry_t s_VitaProfile[160];
+static double s_flVitaProfileLogTime = 0;
+
+void VitaProfileAdd( const char *pszPrefix, const char *pszName, uint64_t nTime )
+{
+	if ( !so_profile_enabled() )
+		return;
+	if ( !pszName )
+		pszName = "?";
+	// pointer match first (classnames and literals are stable within a
+	// level), then by text, since classname storage moves on level changes
+	int iFree = -1;
+	for ( int i = 0; i < ARRAYSIZE( s_VitaProfile ); i++ )
+	{
+		VitaProfileEntry_t &e = s_VitaProfile[i];
+		if ( !e.szName[0] )
+		{
+			iFree = i;
+			break;
+		}
+		if ( e.pszNameKey == pszName && e.pszPrefixKey == pszPrefix )
+		{
+			e.nTime += nTime;
+			e.nCount++;
+			return;
+		}
+	}
+	char szText[48];
+	if ( pszPrefix )
+		Q_snprintf( szText, sizeof( szText ), "%s %s", pszPrefix, pszName );
+	else
+		Q_strncpy( szText, pszName, sizeof( szText ) );
+	for ( int i = 0; i < ARRAYSIZE( s_VitaProfile ) && s_VitaProfile[i].szName[0]; i++ )
+	{
+		VitaProfileEntry_t &e = s_VitaProfile[i];
+		if ( !Q_strcmp( e.szName, szText ) )
+		{
+			e.pszPrefixKey = pszPrefix;
+			e.pszNameKey = pszName;
+			e.nTime += nTime;
+			e.nCount++;
+			return;
+		}
+	}
+	if ( iFree >= 0 )
+	{
+		VitaProfileEntry_t &e = s_VitaProfile[iFree];
+		e.pszPrefixKey = pszPrefix;
+		e.pszNameKey = pszName;
+		Q_strncpy( e.szName, szText, sizeof( e.szName ) );
+		e.nTime = nTime;
+		e.nCount = 1;
+	}
+}
+
+void VitaProfileLog()
+{
+	if ( !so_profile_enabled() )
+	{
+		s_flVitaProfileLogTime = 0;	// a later vita_profile 1 starts a fresh interval
+		return;
+	}
+	double flNow = Plat_FloatTime();
+	if ( s_flVitaProfileLogTime == 0 )
+		s_flVitaProfileLogTime = flNow;
+	double flElapsed = flNow - s_flVitaProfileLogTime;
+	if ( flElapsed < 10.0 )
+		return;
+	char szLine[1536];
+	int nLen = Q_snprintf( szLine, sizeof( szLine ), "[vita] server ms/s:" );
+	for ( int n = 0; n < 16; n++ )
+	{
+		int iBest = -1;
+		for ( int i = 0; i < ARRAYSIZE( s_VitaProfile ); i++ )
+		{
+			if ( s_VitaProfile[i].szName[0] && s_VitaProfile[i].nCount >= 0 && ( iBest < 0 || s_VitaProfile[i].nTime > s_VitaProfile[iBest].nTime ) )
+				iBest = i;
+		}
+		if ( iBest < 0 || s_VitaProfile[iBest].nTime == 0 )
+			break;
+		nLen += Q_snprintf( szLine + nLen, sizeof( szLine ) - nLen, " %s %.1f (%d/s)", s_VitaProfile[iBest].szName,
+			s_VitaProfile[iBest].nTime / 1000.0 / flElapsed, (int)( s_VitaProfile[iBest].nCount / flElapsed ) );
+		s_VitaProfile[iBest].nCount = -1;	// taken
+	}
+	Msg( "%s\n", szLine );
+	memset( s_VitaProfile, 0, sizeof( s_VitaProfile ) );
+	s_flVitaProfileLogTime = flNow;
+}
+
+struct CVitaThinkScope
+{
+	const char *m_pszClass;
+	uint64 m_nStart;
+	CVitaThinkScope( CBaseEntity *pEntity ) : m_pszClass( pEntity->GetClassname() ), m_nStart( so_profile_enabled() ? so_perf_now() : 0 ) {}
+	~CVitaThinkScope() { if ( m_nStart ) VitaProfileAdd( m_pszClass, so_perf_now() - m_nStart ); }
+};
+#endif
+
 void Physics_SimulateEntity( CBaseEntity *pEntity )
 {
+#ifdef PLATFORM_VITA
+	CVitaThinkScope vitaThinkScope( pEntity );
+#endif
 	VPROF( ( !vprof_scope_entity_gamephys.GetBool() ) ? 
 			"Physics_SimulateEntity" : 
 			EntityFactoryDictionary()->GetCannonicalName( pEntity->GetClassname() ) );
@@ -2019,6 +2180,10 @@ void Physics_SimulateEntity( CBaseEntity *pEntity )
 void Physics_RunThinkFunctions( bool simulating )
 {
 	VPROF( "Physics_RunThinkFunctions");
+	VITA_PERF_SCOPE( VITA_PERF_SV_THINK );
+#ifdef PLATFORM_VITA
+	VitaProfileLog();
+#endif
 
 	g_bTestMoveTypeStepSimulation = sv_teststepsimulation.GetBool();
 

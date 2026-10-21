@@ -101,6 +101,8 @@
 #include "replay_internal.h"
 #endif
 
+#include "vita_perf.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1686,6 +1688,8 @@ void CEngineVGui::BackwardCompatibility_Paint()
 void CEngineVGui::Paint( PaintMode_t mode )
 {
 	VPROF_BUDGET( "CEngineVGui::Paint", VPROF_BUDGETGROUP_OTHER_VGUI );
+	VITA_SECTION_SCOPE( "en vgui paint" );
+	VITA_PERF_SCOPE( VITA_PERF_VGUI );
 
 	if ( !staticPanel )
 		return;

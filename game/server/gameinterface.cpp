@@ -148,6 +148,11 @@ CSteamGameServerAPIContext *steamgameserverapicontext = &s_SteamGameServerAPICon
 
 IUploadGameStats *gamestatsuploader = NULL;
 
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+#include "vphysics/stats.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1112,7 +1117,15 @@ void CServerGameDLL::ServerActivate( edict_t *pEdictList, int edictCount, int cl
 	// only display the think limit when the game is run with "developer" mode set
 	if ( !g_pDeveloper->GetInt() )
 	{
+#ifdef PLATFORM_VITA
+		// Vita: server hitches of 60-110 ms are now mostly entity
+		// think, not physics. With -vitadebug, single thinks over 15 ms are
+		// logged (NPCs with their schedule and task, see
+		// CAI_BaseNPC::ReportOverThinkLimit)
+		think_limit.SetValue( CommandLine()->CheckParm( "-vitadebug" ) ? 15 : 0 );
+#else
 		think_limit.SetValue( 0 );
+#endif
 	}
 
 #ifndef _XBOX
@@ -1174,9 +1187,79 @@ void CServerGameDLL::GameServerSteamAPIShutdown( void )
 //-----------------------------------------------------------------------------
 ConVar  trace_report( "trace_report", "0" );
 
+#ifdef PLATFORM_VITA
+// Server ticks over 40 ms are the hitches (the main thread waits for them at
+// the join): each logs where it went, at most one a second, 60 per run.
+// Measured: the slow ticks are PhysFrame's simulate step (physics.cpp
+// splits it out): 36-113 ms with 20-35 ordinary objects awake (prop_physics,
+// ragdolls), not water, penetrations or NPC thinks (~30 ms at most)
+extern uint64 g_nVitaPhysSim, g_nVitaPhysUpdate, g_nVitaPhysEvents;
+extern int g_nVitaPhysActive;
+// physics_main.cpp: this tick's entity thinks and the three longest
+struct VitaThinkTop_t
+{
+	float m_flMs;
+	char m_szClass[32];
+	char m_szName[40];
+};
+extern VitaThinkTop_t g_VitaThinkTop[3];
+extern int g_nVitaThinks;
+
+struct CVitaSlowTick
+{
+	uint64 m_nStart, m_nThink, m_nPost;
+	CVitaSlowTick() : m_nStart( so_perf_now() ), m_nThink( 0 ), m_nPost( 0 )
+	{
+		g_nVitaPhysSim = g_nVitaPhysUpdate = g_nVitaPhysEvents = 0;
+		g_nVitaPhysActive = 0;
+		memset( g_VitaThinkTop, 0, sizeof( g_VitaThinkTop ) );
+		g_nVitaThinks = 0;
+		if ( physenv )
+			physenv->ClearStats();	// per-tick IVP counters (the live pair count stays)
+
+	}
+	~CVitaSlowTick()
+	{
+		uint64 nNow = so_perf_now();
+		uint64 nTime = nNow - m_nStart;
+		static uint64 s_nLastLog;
+		static int s_nLogged;
+		static const bool s_bDebug = CommandLine()->CheckParm( "-vitadebug" ) != NULL;
+		if ( !s_bDebug || nTime < 40000 || nNow - s_nLastLog < 1000000 || s_nLogged >= 60 )
+			return;
+		s_nLastLog = nNow;
+		s_nLogged++;
+		// IVP's own counters for this tick: collision pairs alive and made,
+		// pairs found coming within range object vs object and vs world,
+		// friction contacts solved, impacts
+		physics_stats_t stats;
+		memset( &stats, 0, sizeof( stats ) );
+		if ( physenv )
+			physenv->ReadStats( &stats );
+		Msg( "[vita] slow server tick %d: %.1f ms: entity think %.1f, post-think systems %.1f "
+			"(physics: simulate %.1f, object updates %.1f, collision events %.1f; %d objects awake; "
+			"pairs %d alive, %d made; in range: object vs object %d, vs world %d; friction contacts %d; impacts %d), other %.1f; %d entities\n",
+			gpGlobals->tickcount, nTime / 1000.0, m_nThink / 1000.0, m_nPost / 1000.0,
+			g_nVitaPhysSim / 1000.0, g_nVitaPhysUpdate / 1000.0, g_nVitaPhysEvents / 1000.0, g_nVitaPhysActive,
+			stats.collisionPairsTotal, stats.collisionPairsCreated, stats.potentialCollisionsObjectVsObject,
+			stats.potentialCollisionsObjectVsWorld, stats.frictionEventsProcessed, stats.impactCounter,
+			( nTime - m_nThink - m_nPost ) / 1000.0, gEntList.NumberOfEntities() );
+		// whether one think or many made the entity think time
+		Msg( "[vita]   tick %d thinks: %d; longest %s (%s) %.1f, %s (%s) %.1f, %s (%s) %.1f ms\n", gpGlobals->tickcount, g_nVitaThinks,
+			g_VitaThinkTop[0].m_szClass, g_VitaThinkTop[0].m_szName, g_VitaThinkTop[0].m_flMs,
+			g_VitaThinkTop[1].m_szClass, g_VitaThinkTop[1].m_szName, g_VitaThinkTop[1].m_flMs,
+			g_VitaThinkTop[2].m_szClass, g_VitaThinkTop[2].m_szName, g_VitaThinkTop[2].m_flMs );
+	}
+};
+#endif
+
 void CServerGameDLL::GameFrame( bool simulating )
 {
 	VPROF( "CServerGameDLL::GameFrame" );
+	VITA_PERF_SCOPE( VITA_PERF_SV_GAMEFRAME );
+#ifdef PLATFORM_VITA
+	CVitaSlowTick vitaSlowTick;
+#endif
 
 	// Don't run frames until fully restored
 	if ( g_InRestore )
@@ -1210,7 +1293,10 @@ void CServerGameDLL::GameFrame( bool simulating )
 	gEntList.CleanupDeleteList();
 
 	IGameSystem::FrameUpdatePreEntityThinkAllSystems();
-	GameStartFrame();
+	{
+		VITA_PROFILE_SCOPE( "GameStartFrame" );
+		GameStartFrame();
+	}
 
 #ifndef _XBOX
 #ifdef USE_NAV_MESH
@@ -1224,22 +1310,43 @@ void CServerGameDLL::GameFrame( bool simulating )
 	gamestatsuploader->UpdateConnection();
 #endif
 
-	UpdateQueryCache();
+	{
+		VITA_PROFILE_SCOPE( "UpdateQueryCache" );
+		UpdateQueryCache();
+	}
 	g_pServerBenchmark->UpdateBenchmark();
 
+#ifdef PLATFORM_VITA
+	uint64 nVitaPhase = so_perf_now();
+	Physics_RunThinkFunctions( simulating );
+	vitaSlowTick.m_nThink = so_perf_now() - nVitaPhase;
+	nVitaPhase = so_perf_now();
+	IGameSystem::FrameUpdatePostEntityThinkAllSystems();
+	vitaSlowTick.m_nPost = so_perf_now() - nVitaPhase;
+#else
 	Physics_RunThinkFunctions( simulating );
 	
 	IGameSystem::FrameUpdatePostEntityThinkAllSystems();
+#endif
 
 	// UNDONE: Make these systems IGameSystems and move these calls into FrameUpdatePostEntityThink()
 	// service event queue, firing off any actions whos time has come
-	ServiceEventQueue();
+	{
+		VITA_PROFILE_SCOPE( "ServiceEventQueue" );
+		ServiceEventQueue();
+	}
 
 	// free all ents marked in think functions
-	gEntList.CleanupDeleteList();
+	{
+		VITA_PROFILE_SCOPE( "CleanupDeleteList" );
+		gEntList.CleanupDeleteList();
+	}
 
 	// FIXME:  Should this only occur on the final tick?
-	UpdateAllClientData();
+	{
+		VITA_PROFILE_SCOPE( "UpdateAllClientData" );
+		UpdateAllClientData();
+	}
 
 	if ( g_pGameRules )
 	{

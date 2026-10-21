@@ -21,7 +21,11 @@
 
 DEFINE_FALLBACK_SHADER( WorldVertexTransition, WorldVertexTransition_DX8 )
 
+#ifdef PLATFORM_VITA
+ConVar mat_fullbright( "mat_fullbright","0", FCVAR_NONE );	// not a cheat on the Vita (engine/matsys_interface.cpp)
+#else
 ConVar mat_fullbright( "mat_fullbright","0", FCVAR_CHEAT );
+#endif
 
 BEGIN_VS_SHADER( WorldVertexTransition_DX8,
 			  "Help for WorldVertexTransition_DX8" )

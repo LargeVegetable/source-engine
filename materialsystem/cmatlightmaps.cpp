@@ -19,6 +19,13 @@
 #include "tier0/memdbgon.h"
 #include "bitmap/float_bm.h"
 
+#ifdef PLATFORM_VITA
+// ToGL uploads a whole lightmap page on each unlock, converting every texel
+// (vitaGL stores RGBA, ToGL's copy is BGRA): 512x256 texels per page each
+// frame a dynamic light or light style touches it. Locking just the updated
+// surface's rect uploads only that
+static ConVar mat_vita_lightmap_subrect( "mat_vita_lightmap_subrect", "1", FCVAR_NONE, "Vita: lightmap updates lock and upload just the surface's rect, not the whole page" );
+#endif
 static ConVar mat_lightmap_pfms( "mat_lightmap_pfms", "0", FCVAR_MATERIAL_SYSTEM_THREAD, "Outputs .pfm files containing lightmap data for each lightmap page when a level exits." ); // Write PFM files for each lightmap page in the game directory when exiting a level 
 
 #define USE_32BIT_LIGHTMAPS_ON_360 //uncomment to use 32bit lightmaps, be sure to keep this in sync with the same #define in stdshaders/lightmappedgeneric_ps2_3_x.h
@@ -1996,6 +2003,18 @@ void CMatLightmaps::UpdateLightmap( int lightmapPageID, int lightmapSize[2],
 		VPROF_( "Locking lightmaps", 2, VPROF_BUDGETGROUP_DLIGHT_RENDERING, false, 0 ); // vprof scope
 
 		bLockSubRect = m_nUpdatingLightmapsStackDepth <= 0 && !bDynamic;
+#ifdef PLATFORM_VITA
+		if ( !bDynamic && mat_vita_lightmap_subrect.GetBool() )
+		{
+			// a whole-page lock may still be open from an earlier update
+			if ( m_nLockedLightmap != -1 )
+			{
+				g_pShaderAPI->TexUnlock();
+				m_nLockedLightmap = -1;
+			}
+			bLockSubRect = true;
+		}
+#endif
 		if( bLockSubRect )
 		{
 			VPROF_INCREMENT_COUNTER( "lightmap subrect texlock", 1 );

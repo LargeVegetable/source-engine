@@ -3519,7 +3519,17 @@ bool CBasePlayer::IsUserCmdDataValid( CUserCmd *pCmd )
 	const int nMinDelta = Max( 0, gpGlobals->tickcount - nCmdMaxTickDelta );
 	const int nMaxDelta = gpGlobals->tickcount + nCmdMaxTickDelta;
 
-	bool bValid = ( pCmd->tick_count >= nMinDelta && pCmd->tick_count < nMaxDelta ) &&
+	bool bTickValid = ( pCmd->tick_count >= nMinDelta && pCmd->tick_count < nMaxDelta );
+#ifdef PLATFORM_VITA
+	// Single player: the tick window is multiplayer anti-cheat, and with
+	// host_thread_mode 1 the engine stamps commands with host_tickcount (which
+	// keeps counting through the menu map and loads) rather than the server's
+	// tick, so every command fell outside it and was made inert: zero
+	// movement and buttons, the "left stick doesn't move" bug
+	if ( !bTickValid && gpGlobals->maxClients == 1 )
+		bTickValid = true;
+#endif
+	bool bValid = bTickValid &&
 				  // Prevent clients from sending invalid view angles to try to get leaf server code to crash
 				  ( pCmd->viewangles.IsValid() && IsEntityQAngleReasonable( pCmd->viewangles ) ) &&
 				  // Movement ranges

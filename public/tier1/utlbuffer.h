@@ -768,8 +768,8 @@ inline void CUtlBuffer::GetTypeBin< double >( double &dest )
 		}
 		else
 		{
-			// aligned read
-			dest = *(double *)pData;
+			// memcpy: an unaligned double load faults on ARM (Vita)
+			memcpy( &dest, (void*)pData, sizeof(double) );
 		}
 		if ( m_Byteswap.IsSwappingBytes() )
 		{

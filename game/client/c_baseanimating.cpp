@@ -60,6 +60,8 @@
 #include "c_baseobject.h"
 #endif
 
+#include "vita_perf.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 

@@ -280,6 +280,29 @@ void AnimationController::SetupPosition( AnimCmdAnimate_t& cmd, float *output, c
 		pos = (screendimension / 2) + pos;
 	}
 
+#ifdef PLATFORM_VITA
+	// HUD size (vgui2 Scheme.cpp scales the HUD's scheme up): an animated
+	// absolute y on the 480-line layout keeps its distance from the nearest
+	// edge or the middle, by the same rule as laid-out positions (vgui_controls
+	// Panel.cpp ComputePos). Without it the ammo counter, moved left by the
+	// WeaponUsesSecondaryAmmo animation ("r222 432"), landed below the screen
+	bool bY = ( output == &cmd.target.b ) || ( cmd.variable == m_sYPos );
+	if ( bY && !r && !c && !cmd.align.relativePosition && IsProportional() )
+	{
+		int nScaled = vgui::scheme()->GetProportionalScaledValueEx( GetScheme(), 10000 );
+		int nPlain = vgui::scheme()->GetProportionalScaledValue( 10000 );
+		if ( nPlain > 0 && (float)nScaled / nPlain > 1.001f )
+		{
+			float flUnit = nScaled / 10000.0f;
+			int nLayoutPos = atoi( psz );
+			if ( nLayoutPos > 320 )
+				pos = screendimension - (int)( ( 480 - nLayoutPos ) * flUnit );
+			else if ( nLayoutPos > 160 )
+				pos = screendimension / 2 + (int)( ( nLayoutPos - 240 ) * flUnit );
+		}
+	}
+#endif
+
 	// set the value
 	*output = static_cast<float>( pos );
 }

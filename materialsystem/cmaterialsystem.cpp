@@ -31,6 +31,11 @@
 #endif
 
 // NOTE: This must be the last file included!!!
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/cpu.h>
+#endif
 #include "tier0/memdbgon.h"
 
 #ifdef POSIX
@@ -1801,7 +1806,11 @@ static ConVar mat_showlowresimage(	"mat_showlowresimage", "0", FCVAR_CHEAT );
 //=============================================================================
 // HPE_END
 //=============================================================================
+#ifdef PLATFORM_VITA
+static ConVar mat_fullbright(		"mat_fullbright","0", FCVAR_NONE );	// see engine/matsys_interface.cpp
+#else
 static ConVar mat_fullbright(		"mat_fullbright","0", FCVAR_CHEAT );
+#endif
 static ConVar mat_normalmaps(		"mat_normalmaps", "0", FCVAR_CHEAT );
 static ConVar mat_measurefillrate(	"mat_measurefillrate", "0", FCVAR_CHEAT );
 static ConVar mat_fillrate(			"mat_fillrate", "0", FCVAR_CHEAT );
@@ -2155,13 +2164,39 @@ void CMaterialSystem::WriteConfigIntoConVars( const MaterialSystem_Config_t &con
 bool CMaterialSystem::OverrideConfig( const MaterialSystem_Config_t &_config, bool forceUpdate )
 {
 	Assert( m_bGeneratedConfig );
-	if ( memcmp( &_config, &g_config, sizeof(_config) ) == 0 )
+	MaterialSystem_Config_t config = _config;
+#ifdef PLATFORM_VITA
+	// Cheap settings on the DX9-class path, whatever the engine's convars or
+	// saved configs ask for (the DX7/DX8 shader libraries that -dxlevel 70/80
+	// would use aren't part of this engine): textures at least 1/4 size per
+	// axis (mat_picmip 2; the port default is 3, set in engine/host.cpp), no
+	// anisotropic filtering, bump, specular, phong or parallax maps, HDR, AA,
+	// projected flashlight, shadow depth textures or motion blur. Trilinear filtering
+	// and lightmaps follow mat_trilinear and mat_fullbright (port defaults:
+	// trilinear on, lightmaps on)
+	if ( config.skipMipLevels < 2 )
+		config.skipMipLevels = 2;
+	config.m_nForceAnisotropicLevel = 1;
+	config.m_nAASamples = 1;
+	config.m_nAAQuality = 0;
+	config.m_Flags &= ~( MATSYS_VIDCFG_FLAGS_ENABLE_PARALLAX_MAPPING |
+		MATSYS_VIDCFG_FLAGS_ENABLE_HDR | MATSYS_VIDCFG_FLAGS_USE_Z_PREFILL );
+	config.m_Flags |= MATSYS_VIDCFG_FLAGS_DISABLE_SPECULAR | MATSYS_VIDCFG_FLAGS_DISABLE_BUMPMAP |
+		MATSYS_VIDCFG_FLAGS_DISABLE_PHONG | MATSYS_VIDCFG_FLAGS_REDUCE_FILLRATE;
+	config.m_bShadowDepthTexture = false;
+	config.m_bMotionBlur = false;
+	// No projected-texture flashlight: each surface it touched needed a
+	// flashlight shader combo compiled on the device (~3 s stalls), and it
+	// drew dim and blue. The client uses the old dynamic-light flashlight
+	// instead (r_newflashlight 0, game/client/flashlighteffect.cpp)
+	config.m_bSupportFlashlight = false;
+#endif
+	if ( memcmp( &config, &g_config, sizeof(config) ) == 0 )
 	{
 		return false;
 	}
 
 	MaterialLock_t hLock = Lock();
-	MaterialSystem_Config_t config = _config;
 
 	bool bRedownloadLightmaps = false;
 	bool bRedownloadTextures = false;
@@ -3514,6 +3549,10 @@ static const char *GetMatString( enum MaterialThreadMode_t ThreadMode )
 }
 #endif
 
+#ifdef PLATFORM_VITA
+ConVar vita_matqueue_core( "vita_matqueue_core", "2", FCVAR_NONE, "Vita: core the queued material system's render thread runs on (0-2; -1 = any)" );
+ConVar vita_queued_render( "vita_queued_render", "1", FCVAR_NONE, "Vita: run the material system, shaders and GL on a render thread (queued material system); 0 = single threaded" );
+#endif
 ConVar mat_queue_mode( "mat_queue_mode", "-1", FCVAR_ARCHIVE, "The queue/thread mode the material system should use: -1=default, 0=synchronous single thread"
 #ifdef MAT_QUEUE_MODE_PROFILE
 	", 1=queued single thread"
@@ -3530,6 +3569,25 @@ void CMaterialSystem::ThreadExecuteQueuedContext( CMatQueuedRenderContext *pCont
 #endif
 
 	Assert( m_bThreadHasOwnership );
+#ifdef PLATFORM_VITA
+	VITA_PERF_SCOPE( VITA_PERF_MATQUEUE_EXEC );
+	// Unpinned Vita threads stay on their creator's core: the MatQueue
+	// thread shared core 0 with the main thread. Pin it (vita_matqueue_core;
+	// the job pool workers are on cores 1 and 2)
+	static int s_nVitaAppliedCore = -2;
+	if ( vita_matqueue_core.GetInt() != s_nVitaAppliedCore )
+	{
+		s_nVitaAppliedCore = vita_matqueue_core.GetInt();
+		int nMask = ( s_nVitaAppliedCore >= 0 && s_nVitaAppliedCore <= 2 ) ? ( SCE_KERNEL_CPU_MASK_USER_0 << s_nVitaAppliedCore ) : SCE_KERNEL_CPU_MASK_USER_ALL;
+		sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), nMask );
+		static bool s_bVitaRegistered = false;
+		if ( !s_bVitaRegistered )
+		{
+			s_bVitaRegistered = true;
+			so_thread_register( "render" );
+		}
+	}
+#endif
 
 	m_nRenderThreadID = ThreadGetCurrentId(); 
 	IMatRenderContextInternal* pSavedRenderContext = m_pRenderContext.Get();
@@ -3550,7 +3608,12 @@ IThreadPool *CMaterialSystem::CreateMatQueueThreadPool()
 		ThreadPoolStartParams_t startParams;
 
 		startParams.nThreads = 1;
+#ifdef PLATFORM_VITA
+		// shader compiles (libshacccg) and vitaGL run on this thread too
+		startParams.nStackSize = 2*1024*1024;
+#else
 		startParams.nStackSize = 256*1024;
+#endif
 		startParams.fDistribute = TRS_TRUE;
 
 		// The rendering thread has the GL context and the main thread is coming in and
@@ -3666,6 +3729,15 @@ void CMaterialSystem::EndFrame( void )
 #endif
 
 	MaterialThreadMode_t nextThreadMode = ( iConVarThreadMode >= 0 ) ? (MaterialThreadMode_t)iConVarThreadMode : m_IdealThreadMode;
+#ifdef PLATFORM_VITA
+	// Queued rendering (material system, shaders, ToGL and vitaGL on the
+	// MatQueue thread), on by default; vita_queued_render 0 turns it
+	// off. Not FCVAR_ARCHIVE, unlike
+	// mat_queue_mode, so the setting in vita_user.cfg always takes effect. The queue's vertex/index stacks
+	// reserve address space and commit on demand
+	if ( !vita_queued_render.GetBool() )
+		nextThreadMode = MATERIAL_SINGLE_THREADED;
+#endif
 	// note: This is a hack because there is no explicit query for the device being deactivated due to device lost.
 	// however, that is all the current implementation of CanDownloadTextures actually does.
 	bool bDeviceReady = g_pShaderAPI->CanDownloadTextures();
@@ -3698,6 +3770,9 @@ void CMaterialSystem::EndFrame( void )
 
 			if ( m_pActiveAsyncJob && !m_pActiveAsyncJob->IsFinished() )
 			{
+#ifdef PLATFORM_VITA
+				VITA_PERF_SCOPE( VITA_PERF_MATQUEUE_WAIT );
+#endif
 				m_pActiveAsyncJob->WaitForFinish(TT_INFINITE, pThreadPool);
 
 				// Sync with GPU if we had a job for it, even if it finished early on CPU!

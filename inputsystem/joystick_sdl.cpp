@@ -12,6 +12,9 @@
 #include "SDL.h"
 #include "SDL_gamecontroller.h"
 #include "SDL_haptic.h"
+#ifdef PLATFORM_VITA
+#include <psp2/touch.h>
+#endif
 
 // NOTE: This has to be the last file included!
 #include "tier0/memdbgon.h"
@@ -492,6 +495,46 @@ void CInputSystem::UpdateJoystickPOVControl( int nJoystick )
 //-----------------------------------------------------------------------------
 void CInputSystem::PollJoystick( void )
 {
+#ifdef PLATFORM_VITA
+	// Rear touchpad as two extra buttons the Vita lacks: a finger on the left
+	// half is the left stick click (STICK1, crouch in vita_binds), on the
+	// right half the right stick click (STICK2, unbound)
+	static bool s_bRearTouchStarted = false, s_bRearLeft = false, s_bRearRight = false;
+	if ( !s_bRearTouchStarted )
+	{
+		sceTouchSetSamplingState( SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START );
+		s_bRearTouchStarted = true;
+	}
+	SceTouchData touch;
+	bool bLeft = false, bRight = false;
+	if ( sceTouchPeek( SCE_TOUCH_PORT_BACK, &touch, 1 ) > 0 )
+	{
+		for ( unsigned int i = 0; i < touch.reportNum; i++ )
+		{
+			if ( touch.report[i].x < 960 )	// the rear panel spans x 0-1919
+				bLeft = true;
+			else
+				bRight = true;
+		}
+	}
+	if ( bLeft != s_bRearLeft )
+	{
+		if ( bLeft )
+			PostButtonPressedEvent( IE_ButtonPressed, m_nLastSampleTick, KEY_XBUTTON_STICK1, KEY_XBUTTON_STICK1 );
+		else
+			PostButtonReleasedEvent( IE_ButtonReleased, m_nLastSampleTick, KEY_XBUTTON_STICK1, KEY_XBUTTON_STICK1 );
+		s_bRearLeft = bLeft;
+	}
+	if ( bRight != s_bRearRight )
+	{
+		if ( bRight )
+			PostButtonPressedEvent( IE_ButtonPressed, m_nLastSampleTick, KEY_XBUTTON_STICK2, KEY_XBUTTON_STICK2 );
+		else
+			PostButtonReleasedEvent( IE_ButtonReleased, m_nLastSampleTick, KEY_XBUTTON_STICK2, KEY_XBUTTON_STICK2 );
+		s_bRearRight = bRight;
+	}
+#endif
+
 	// We only pump the SDL event loop if we're not an SDL app, since otherwise PollInputState_Platform calls into CSDLMgr to pump it.
 	// Our state updates happen in events posted by SDL_GameController in JoystickSDLWatcher, so the loop is empty.
 #if !defined( USE_SDL )

@@ -37,6 +37,14 @@ static bool g_bWarnedOverflow;
 
 static int GetTargetCacheSize()
 {
+#ifdef PLATFORM_VITA
+	// The data cache (models, sounds, animations) would get 64 MB of the
+	// Vita's 224 MB heap (host_parms.memsize minus the hunk). With that, the
+	// map tour ran out of heap loading the coast maps, where the cache held
+	// 56 MB (38-45 in d1_eli_01, ~15 in d1_town_02). 40 MB: unlocked data
+	// beyond it is evicted and reloaded when next needed
+	return 40 * 1024 * 1024;
+#endif
 	int nMemLimit = host_parms.memsize - Hunk_Size();
 	if ( nMemLimit < 0x100000 )
 	{

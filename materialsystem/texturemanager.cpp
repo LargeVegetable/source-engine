@@ -620,6 +620,9 @@ class CTextureManager : public ITextureManager
 {
 public:
 	CTextureManager( void );
+#ifdef PLATFORM_VITA
+	void VitaTextureReport();	// vita_texture_report
+#endif
 
 	// Initialization + shutdown
 	virtual void Init( int nFlags ) OVERRIDE;
@@ -798,6 +801,77 @@ protected:
 //-----------------------------------------------------------------------------
 static CTextureManager s_TextureManager;
 ITextureManager *g_pTextureManager = &s_TextureManager;
+
+#ifdef PLATFORM_VITA
+// What the loaded textures take now and would take at sharper settings
+// (for planning a sharper-texture option): each texture's loaded size is
+// worked out again from its file size the way ComputeMipSkipCount does it
+// (mat_picmip halvings that stop at the floors), at mat_picmip 3 with a
+// 128 floor, at mat_picmip 2, and with the 128 floor for world textures
+// only (models/ keep 64). Render targets and procedural textures are left
+// out. Run by the engine once a map has loaded. Temporary
+extern ConVar mat_picmip_min_size, mat_picmip_alphatest_min_size, mat_picmip_viewmodel_min_size;
+#define VITA_TEXTUREFLAGS_ALPHATEST TEXTUREFLAGS_UNUSED_00400000	// ctexture.cpp TEXTUREFLAGS_VITA_ALPHATEST
+
+static int VitaTextureBytes( ITexture *pTex, int nPicmip, int nFloor )
+{
+	int w = pTex->GetMappingWidth(), h = pTex->GetMappingHeight();
+	const unsigned nFlags = pTex->GetFlags();
+	if ( !( nFlags & TEXTUREFLAGS_NOLOD ) )
+	{
+		int nMin = nFloor;
+		if ( nFlags & VITA_TEXTUREFLAGS_ALPHATEST )
+			nMin = MAX( nMin, mat_picmip_alphatest_min_size.GetInt() );
+		if ( !V_strnicmp( pTex->GetName(), "models/weapons/v_", 17 ) )
+			nMin = MAX( nMin, mat_picmip_viewmodel_min_size.GetInt() );
+		nMin = MAX( nMin, 4 );
+		for ( int i = 0; i < nPicmip; i++ )
+		{
+			if ( w > nMin && h > nMin )
+			{
+				w >>= 1;
+				h >>= 1;
+			}
+		}
+	}
+	const int nImages = MAX( pTex->GetNumAnimationFrames(), 1 ) * ( pTex->IsCubeMap() ? 6 : 1 );
+	return ImageLoader::GetMemRequired( w, h, MAX( pTex->GetMappingDepth(), 1 ), pTex->GetImageFormat(), pTex->IsMipmapped() ) * nImages;
+}
+
+void CTextureManager::VitaTextureReport()
+{
+	const int nFloor = mat_picmip_min_size.GetInt();
+	int64 nActual = 0, nNow = 0, nFloor128 = 0, nPicmip2 = 0, nWorldFloor128 = 0, nWorld = 0, nModels = 0;
+	int nCount = 0, nCountWorld = 0;
+	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
+	{
+		ITextureInternal *pTex = m_TextureList[i];
+		if ( !pTex || pTex->IsError() || pTex->IsRenderTarget() || pTex->IsProcedural() || pTex->GetMappingWidth() <= 0 || pTex->GetActualWidth() <= 0 )
+			continue;
+		const bool bModel = !V_strnicmp( pTex->GetName(), "models/", 7 );
+		const int nImages = MAX( pTex->GetNumAnimationFrames(), 1 ) * ( pTex->IsCubeMap() ? 6 : 1 );
+		const int nThis = ImageLoader::GetMemRequired( pTex->GetActualWidth(), pTex->GetActualHeight(), MAX( pTex->GetActualDepth(), 1 ), pTex->GetImageFormat(), pTex->IsMipmapped() ) * nImages;
+		const int nNowEst = VitaTextureBytes( pTex, 3, nFloor );
+		const int nAt128 = VitaTextureBytes( pTex, 3, MAX( nFloor, 128 ) );
+		nActual += nThis;
+		nNow += nNowEst;
+		nFloor128 += nAt128;
+		nPicmip2 += VitaTextureBytes( pTex, 2, nFloor );
+		nWorldFloor128 += bModel ? nNowEst : nAt128;
+		( bModel ? nModels : nWorld ) += nThis;
+		nCount++;
+		nCountWorld += !bModel;
+	}
+	Msg( "[vita] textures: %d (%d world), %.1f MB loaded (estimated %.1f: world %.1f, models %.1f); sharper: floor 128 %.1f MB, world floor 128 %.1f MB, mat_picmip 2 %.1f MB\n",
+		nCount, nCountWorld, nActual / 1048576.0, nNow / 1048576.0, nWorld / 1048576.0, nModels / 1048576.0,
+		nFloor128 / 1048576.0, nWorldFloor128 / 1048576.0, nPicmip2 / 1048576.0 );
+}
+
+CON_COMMAND( vita_texture_report, "Vita: texture memory now and at sharper texture settings" )
+{
+	s_TextureManager.VitaTextureReport();
+}
+#endif
 
 struct AsyncLoadJob_t 
 {

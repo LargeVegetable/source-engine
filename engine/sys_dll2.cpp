@@ -268,7 +268,19 @@ extern "C" void __cdecl FailSafe( unsigned int uStructuredExceptionCode, struct 
 
 #endif
 
-#if defined( POSIX )
+#if defined( PLATFORM_VITA )
+
+// newlib has no sigsetjmp; the signal mask isn't meaningful on Vita anyway
+static jmp_buf g_mark;
+static void posix_signal_handler( int i )
+{
+	longjmp( g_mark, -1 );
+}
+
+#define DO_TRY		if ( setjmp( g_mark ) == 0 )
+#define DO_CATCH	else
+
+#elif defined( POSIX )
 
 static sigjmp_buf g_mark;
 static void posix_signal_handler( int i )

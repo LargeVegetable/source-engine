@@ -309,6 +309,9 @@ bool FileSystem_GetExecutableDir( char *exedir, int exeDirLen )
 {
 #ifdef ANDROID
 	Q_snprintf( exedir, exeDirLen, "%s", getenv("APP_LIB_PATH") );
+#elif defined( PLATFORM_VITA )
+	// modules ship inside the app, see Sys_LoadModule
+	Q_snprintf( exedir, exeDirLen, "app0:bin" );
 #else
 	exedir[0] = 0;
 
@@ -365,6 +368,13 @@ static bool FileSystem_GetBaseDir( char *baseDir, int baseDirLen )
 {
 #ifdef ANDROID
 	strncpy(baseDir, getenv("VALVE_GAME_PATH"), baseDirLen);
+	return true;
+#elif defined( PLATFORM_VITA )
+	// the game data dir, passed by the Vita launcher
+	const char *pBaseDir = CommandLine()->ParmValue( "-basedir" );
+	if ( !pBaseDir )
+		return false;
+	Q_strncpy( baseDir, pBaseDir, baseDirLen );
 	return true;
 #else
 	if ( FileSystem_GetExecutableDir( baseDir, baseDirLen ) )

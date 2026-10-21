@@ -250,8 +250,20 @@ void GLMDebugPrintf( const char *pMsg, ... )
 //===============================================================================
 // functions that are dependant on g_pLauncherMgr
 
+#ifdef PLATFORM_VITA
+// owner of the GL device, for VitaCheckRenderThread (set in MakeCurrent)
+static ThreadId_t s_nVitaRenderThread = 0;
+#endif
+
 inline bool MakeContextCurrent( PseudoGLContextPtr hContext ) 
 {
+#ifdef PLATFORM_VITA
+	// vitaGL has one global context, current on any thread. SDL's Vita
+	// MakeCurrent glFinish()es, clears the framebuffer to black and finishes
+	// again: ToGL calls it at every hand-off of the device between the main
+	// and render threads (queued material system)
+	return true;
+#endif
 	return g_pLauncherMgr->MakeContextCurrent( hContext );
 }
 
@@ -508,6 +520,9 @@ void GLMContext::MakeCurrent( bool bRenderThread )
 	{
 //		Msg( "********************************************  %08x Acquiring Context\n", ThreadGetCurrentId() );
 		m_nCurOwnerThreadId = ThreadGetCurrentId();
+#ifdef PLATFORM_VITA
+		s_nVitaRenderThread = m_nCurOwnerThreadId;	// the render-thread guard follows the owner
+#endif
 		bool bSuccess = MakeContextCurrent( m_ctx );
 		if ( !bSuccess )
 		{
@@ -554,6 +569,9 @@ void GLMContext::ReleaseCurrent( bool bRenderThread )
 //		Msg( "********************************************  %08x Releasing Context\n", ThreadGetCurrentId() );
 		m_nCurOwnerThreadId = 0;
 		m_nThreadOwnershipReleaseCounter++;
+#ifdef PLATFORM_VITA
+		s_nVitaRenderThread = (ThreadId_t)~0u;	// nobody owns GL until the next MakeCurrent
+#endif
 		MakeContextCurrent( NULL );
 	}
 #else
@@ -2357,9 +2375,29 @@ static uint gPersistentBufferSize[kGLMNumBufferTypes] =
 	0,					// kGLMPixelBuffer
 };
 
+#ifdef PLATFORM_VITA
+extern "C" void so_log_backtrace( const char *tag );
+
+void VitaCheckRenderThread( const char *pszWhat )
+{
+	if ( !s_nVitaRenderThread || ThreadGetCurrentId() == s_nVitaRenderThread )
+		return;
+	static int s_nReports = 0;
+	if ( s_nReports >= 8 )
+		return;
+	s_nReports++;
+	Msg( "[vita] GL %s off the render thread (thread %u, render thread %u)\n", pszWhat,
+		(unsigned)ThreadGetCurrentId(), (unsigned)s_nVitaRenderThread );
+	so_log_backtrace( pszWhat );
+}
+#endif
+
 GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 {
 	m_nNumDirtySamplers = 0;
+#ifdef PLATFORM_VITA
+	s_nVitaRenderThread = ThreadGetCurrentId();
+#endif
 
 	if( gGL->m_nDriverProvider == cGLDriverProviderARM )
 		m_bUseSamplerObjects = true;

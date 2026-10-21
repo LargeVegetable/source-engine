@@ -40,6 +40,11 @@
 #include <android/log.h>
 #endif
 
+#ifdef PLATFORM_VITA
+// provided by the Vita launcher; stdout can't be redirected to a file there
+extern "C" void so_log_write( const char *text );
+#endif
+
 #include "tier0/etwprof.h"
 
 #ifndef STEAM
@@ -449,6 +454,8 @@ static SpewRetval_t _SpewMessage( SpewType_t spewType, const char *pGroupName, i
 
 #ifdef ANDROID
 	__android_log_print( ANDROID_LOG_INFO, "SRCENG", "%s", pTempBuffer );
+#elif defined( PLATFORM_VITA )
+	so_log_write( pTempBuffer );
 #endif
 	g_DbgLogger.Write( pTempBuffer );
 

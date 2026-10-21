@@ -149,6 +149,10 @@ ConVar	ai_debug_dyninteractions( "ai_debug_dyninteractions", "0", FCVAR_NONE, "D
 ConVar	ai_frametime_limit( "ai_frametime_limit", "50", FCVAR_NONE, "frametime limit for min efficiency AIE_NORMAL (in sec's)." );
 
 ConVar	ai_use_think_optimizations( "ai_use_think_optimizations", "1" );
+#ifdef PLATFORM_VITA
+ConVar	ai_vita_idle_think_interval( "ai_vita_idle_think_interval", "0.2", FCVAR_NONE, "Vita: think interval for standing, idle, efficient NPCs (0.1 = stock)" );
+ConVar	ai_think_limit_ms( "ai_think_limit_ms", "10", FCVAR_NONE, "Vita: NPC think time allowed per server tick (ms) before non-choreographed NPCs are deferred (PC: 10)" );
+#endif
 
 ConVar	ai_test_moveprobe_ignoresmall( "ai_test_moveprobe_ignoresmall", "0" );
 
@@ -3182,7 +3186,13 @@ void CAI_BaseNPC::UpdateEfficiency( bool bInPVS )
 			 GetTaskInterrupt() > 0 ||
 			 m_bInChoreo ) ) )
 	{
+#ifdef PLATFORM_VITA
+		// scripted and choreographed NPCs (story scenes) stay at full rate
+		// when the frame-rate step-down applies
+		SetEfficiency( ( bFramerateOk || m_bInChoreo ) ? AIE_NORMAL : AIE_EFFICIENT );
+#else
 		SetEfficiency( ( bFramerateOk ) ? AIE_NORMAL : AIE_EFFICIENT );
+#endif
 		return;
 	}
 
@@ -3689,6 +3699,11 @@ bool CAI_BaseNPC::PreNPCThink()
 
 #ifdef _DEBUG
 	const float NPC_THINK_LIMIT = 30.0 / 1000.0;
+#elif defined( PLATFORM_VITA )
+	// Per server tick NPC think budget, tunable (choreographed NPCs exempt;
+	// an NPC that hasn't thought for 0.25 s always runs). Defaults to the
+	// PC's 10 ms
+	const float NPC_THINK_LIMIT = ai_think_limit_ms.GetFloat() / 1000.0f;
 #else
 	const float NPC_THINK_LIMIT = ( !IsXbox() ) ? (10.0 / 1000.0) : (12.5 / 1000.0);
 #endif
@@ -3898,6 +3913,7 @@ bool CAI_BaseNPC::CheckPVSCondition()
 // npc's specific animation events
 //
 
+
 void CAI_BaseNPC::NPCThink( void )
 {
 	if ( m_bCheckContacts )
@@ -3938,7 +3954,8 @@ void CAI_BaseNPC::NPCThink( void )
 
 			SetPlayerAvoidState();
 
-			if ( PreThink() )
+			bool bPreThink = PreThink();
+			if ( bPreThink )
 			{
 				if ( m_flNextDecisionTime <= gpGlobals->curtime )
 				{
@@ -4034,6 +4051,20 @@ void CAI_BaseNPC::NPCThink( void )
 			m_flNextDecisionTime = gpGlobals->curtime + g_DecisionIntervals[GetEfficiency()];
 		}
 
+#ifdef PLATFORM_VITA
+		// Standing NPCs that already decide at most every 0.2 s (efficient or
+		// lower) think at that rate too: their in-between thinks only advance
+		// animation and yaw, which the client interpolates. Anything moving,
+		// fighting, scripted, hurt or in the player's squad keeps 0.1 s.
+		bool bVitaIdle = ( GetEfficiency() >= AIE_EFFICIENT && !m_bIsMoving && !m_bInChoreo &&
+			( m_NPCState == NPC_STATE_IDLE || m_NPCState == NPC_STATE_ALERT ) && !GetEnemy() &&
+			gpGlobals->curtime - m_flLastDamageTime > 1.0f && !IsInPlayerSquad() );
+		if ( bVitaIdle && ai_vita_idle_think_interval.GetFloat() > 0.1f )
+		{
+			SetNextThink( gpGlobals->curtime + MIN( ai_vita_idle_think_interval.GetFloat(), 0.4f ) );
+		}
+		else
+#endif
 		if ( GetMoveEfficiency() == AIME_NORMAL || GetEfficiency() == AIE_NORMAL )
 		{
 			SetNextThink( gpGlobals->curtime + .1 );
@@ -9334,6 +9365,13 @@ ConVar ai_think_limit_label( "ai_think_limit_label", "0", FCVAR_ARCHIVE );
 
 void CAI_BaseNPC::ReportOverThinkLimit( float time )
 {
+#ifdef PLATFORM_VITA
+	// always logged on the Vita (DevMsg needs developer), with the task. Stage
+	// timers found decision (pathfinding) and movement 10-28 ms
+	const Task_t *pTask = GetTask();
+	Msg( "[vita] %s (%s) thinking for %.1f ms: schedule %s, task %s\n",
+		 GetClassname(), GetDebugName(), time, GetCurSchedule()->GetName(), pTask ? TaskName( pTask->iTask ) : "none" );
+#else
 	DevMsg( "%s thinking for %.02fms!!! (%s); r%.2f (c%.2f, pst%.2f, ms%.2f), p-r%.2f, m%.2f\n",
 		 GetDebugName(), time, GetCurSchedule()->GetName(),
 		 g_AIRunTimer.GetDuration().GetMillisecondsF(),
@@ -9342,6 +9380,7 @@ void CAI_BaseNPC::ReportOverThinkLimit( float time )
 		 g_AIMaintainScheduleTimer.GetDuration().GetMillisecondsF(),
 		 g_AIPostRunTimer.GetDuration().GetMillisecondsF(),
 		 g_AIMoveTimer.GetDuration().GetMillisecondsF() );
+#endif
 
 	if (ai_think_limit_label.GetBool()) 
 	{

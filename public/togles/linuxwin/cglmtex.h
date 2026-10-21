@@ -539,6 +539,9 @@ protected:
 	char					*m_debugLabel;	// strdup() of debugLabel passed in, or NULL
 	
 	bool					m_texClientStorage;	// was CS selected for texture
+#ifdef PLATFORM_VITA
+	bool					m_bVitaKeepBacking;	// lightmap pages: keep the CPU copy between locks (cglmtex.cpp)
+#endif
 	bool					m_texPreloaded;		// has it been kicked into VRAM with GLMContext::PreloadTex yet
 
 	int						m_srgbFlipCount;

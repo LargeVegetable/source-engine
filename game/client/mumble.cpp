@@ -7,7 +7,7 @@
 #if defined( WIN32 ) && !defined( _X360 )
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#elif defined( POSIX )
+#elif defined( POSIX ) && !defined( PLATFORM_VITA )
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -98,7 +98,7 @@ void CMumbleSystem::LevelInitPostEntity()
 		g_hMapObject = NULL;
 		return;
 	}
-#elif defined( ANDROID )
+#elif defined( ANDROID ) || defined( PLATFORM_VITA )
 	return; // TODO(JusicP): implement
 #elif defined( POSIX )
 	char memname[256];
@@ -130,7 +130,7 @@ void CMumbleSystem::LevelShutdownPreEntity()
 		g_pMumbleMemory = NULL;
 		g_hMapObject = NULL;
 	}
-#elif defined( POSIX )
+#elif defined( POSIX ) && !defined( PLATFORM_VITA )
 	if ( g_pMumbleMemory )
 	{
 		munmap( g_pMumbleMemory, sizeof(struct MumbleSharedMemory_t) );

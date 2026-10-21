@@ -164,8 +164,18 @@ static FILE *GetDebugFileHandle( void )
 	// to the filename glshaders.cfg
 	//
 
+#ifdef PLATFORM_VITA
+	// Off on the Vita: the boot preload replayed every pair saved by every
+	// earlier session (107 pairs, 15.7 s at boot, 920 of vitaGL's 2048 shader
+	// slots used before the first map), and the saved table only grows.
+	// Shaders are created at map load instead (vitaGL's disk cache keeps the
+	// compiled code, so that's a cache read)
+	ConVar mat_autosave_glshaders( "mat_autosave_glshaders", "0" );
+	ConVar mat_autoload_glshaders( "mat_autoload_glshaders", "0" );
+#else
 	ConVar mat_autosave_glshaders( "mat_autosave_glshaders", "1" );
 	ConVar mat_autoload_glshaders( "mat_autoload_glshaders", "1" );
+#endif
 #endif
 //-----------------------------------------------------------------------------
 // Explicit instantiation of shader buffer implementation
@@ -2087,6 +2097,20 @@ FileHandle_t CShaderManager::OpenFileAndLoadHeader( const char *pFileName, Shade
 				g_pFullFileSystem->Close( fp );
 				return FILESYSTEM_INVALID_HANDLE;
 		}
+#ifdef PLATFORM_VITA
+		// The engine's combo tables (fxctmp9/*.inc) match SDK 2013 SP /
+		// pre-20th-anniversary HL2; the anniversary shaders have more dynamic
+		// combos, so combo indices land on the wrong (or no) shader
+		static bool s_bVitaVcsChecked = false;
+		if ( !s_bVitaVcsChecked && V_stristr( pFileName, "vertexlit_and_unlit_generic_ps20b" ) )
+		{
+			s_bVitaVcsChecked = true;
+			if ( pHeader->m_nDynamicCombos != 6 )
+				Warning( "[vita] SHADER DATA MISMATCH: %s has %d dynamic combos, engine expects 6. "
+					"These shaders are from the HL2 20th anniversary update; use the pre-20th-anniversary build's hl2 data.\n",
+					pFileName, pHeader->m_nDynamicCombos );
+		}
+#endif
 	}
 
 	return fp;

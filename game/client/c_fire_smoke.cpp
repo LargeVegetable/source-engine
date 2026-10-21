@@ -93,12 +93,45 @@ END_RECV_TABLE()
 // C_FireSmoke
 //==================================================
 
+#ifdef PLATFORM_VITA
+// env_fire's smoke columns: big translucent particles over much of the screen
+// in fire-heavy areas (Ravenholm). Off by default on the Vita
+// (cheaper); Options > Video > Fire smoke. Fires burning now restart
+// their effect when it changes
+static CUtlVector< C_FireSmoke * > s_VitaFires;
+
+static void VitaFireSmokeChanged( IConVar *pVar, const char *pOldValue, float flOldValue )
+{
+	for ( int i = 0; i < s_VitaFires.Count(); i++ )
+		s_VitaFires[i]->VitaRestartEffect();
+}
+
+static ConVar vita_fire_smoke( "vita_fire_smoke", "0", FCVAR_NONE, "Vita: smoke columns above fires (0, default: off, cheaper; 1: on)", VitaFireSmokeChanged );
+
+void C_FireSmoke::VitaRestartEffect( void )
+{
+	if ( !m_hEffect )
+		return;	// not started yet
+	// the old effect's particles die out on their own
+	ParticleProp()->StopEmission( m_hEffect );
+	m_hEffect = NULL;
+	Start();
+}
+#endif
+
 C_FireSmoke::C_FireSmoke()
 {
+#ifdef PLATFORM_VITA
+	m_hEffect = NULL;
+	s_VitaFires.AddToTail( this );
+#endif
 }
 
 C_FireSmoke::~C_FireSmoke()
 {
+#ifdef PLATFORM_VITA
+	s_VitaFires.FindAndFastRemove( this );
+#endif
 
 	// Shut down our effect if we have it
 	if ( m_hEffect )
@@ -166,24 +199,29 @@ bool C_FireSmoke::ShouldDraw()
 void C_FireSmoke::Start( void )
 {
 	const char *lpszEffectName;
+	bool bSmoke = ( m_nFlags & bitsFIRESMOKE_SMOKE ) != 0;
+#ifdef PLATFORM_VITA
+	if ( !vita_fire_smoke.GetBool() )
+		bSmoke = false;
+#endif
 	int nSize = (int) floor( m_flStartScale / 36.0f );
 	switch ( nSize )
 	{
 	case 0:
-		lpszEffectName = ( m_nFlags & bitsFIRESMOKE_SMOKE ) ? "env_fire_tiny_smoke" : "env_fire_tiny";
+		lpszEffectName = bSmoke ? "env_fire_tiny_smoke" : "env_fire_tiny";
 		break;
 
 	case 1:
-		lpszEffectName = ( m_nFlags & bitsFIRESMOKE_SMOKE ) ? "env_fire_small_smoke" : "env_fire_small";
+		lpszEffectName = bSmoke ? "env_fire_small_smoke" : "env_fire_small";
 		break;
 
 	case 2:
-		lpszEffectName = ( m_nFlags & bitsFIRESMOKE_SMOKE ) ? "env_fire_medium_smoke" : "env_fire_medium";
+		lpszEffectName = bSmoke ? "env_fire_medium_smoke" : "env_fire_medium";
 		break;
 
 	case 3:
 	default:
-		lpszEffectName = ( m_nFlags & bitsFIRESMOKE_SMOKE ) ? "env_fire_large_smoke" : "env_fire_large";
+		lpszEffectName = bSmoke ? "env_fire_large_smoke" : "env_fire_large";
 		break;
 	}
 

@@ -49,6 +49,8 @@
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
+#include "vita_perf.h"
+
 #include "tier0/memdbgon.h"
 
 class IClientEntity;
@@ -260,7 +262,10 @@ void V_RenderView( void )
 		// We can get into situations where some other material system app
 		// is trying to start up; in those cases, we shouldn't render...
 		vrect_t scr_vrect = videomode->GetClientViewRect();
-		g_ClientDLL->View_Render( &scr_vrect );
+		{
+			VITA_PERF_SCOPE( VITA_PERF_VIEW_RENDER );
+			g_ClientDLL->View_Render( &scr_vrect );
+		}
 	}
 
 	FullViewColorAdjustment();

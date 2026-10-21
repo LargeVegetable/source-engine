@@ -1488,7 +1488,15 @@ void Panel::OnChildAdded(VPANEL child)
 	Panel *pChild = ipanel()->GetPanel(child, GetControlsModuleName());
 	if ( pChild )
 	{
-		auto idx = m_dictChidlren.Insert( pChild->GetName() );
+		// One entry per name. CEngineVGui::Paint detaches the client's root
+		// panels and attaches them again every frame (ipanel()->SetParent,
+		// which doesn't remove them from here), so inserting each time added
+		// a duplicate per frame for good: ~18 KB/s of heap while idle, and a
+		// node array doubling to megabytes (found with a heap tracker)
+		const char *pszName = pChild->GetName();
+		auto idx = m_dictChidlren.Find( pszName );
+		if ( idx == m_dictChidlren.InvalidIndex() )
+			idx = m_dictChidlren.Insert( pszName );
 		m_dictChidlren[ idx ].Set( child );
 	}
 }
@@ -6399,6 +6407,20 @@ void Panel::DrawBox(int x, int y, int wide, int tall, Color color, float normali
 	// draw the background in the areas not occupied by the corners
 	// draw it in three horizontal strips
 	surface()->DrawSetColor(color);
+#ifdef PLATFORM_VITA
+	// one draw call for the three strips instead of three (each VGUI draw
+	// costs ~0.1 ms of CPU on the Vita; HUD panels draw a box every frame)
+	if ( !hollow )
+	{
+		IntRect strips[3] = {
+			{ x + cornerWide, y, x + wide - cornerWide, y + cornerTall },
+			{ x, y + cornerTall, x + wide, y + tall - cornerTall },
+			{ x + cornerWide, y + tall - cornerTall, x + wide - cornerWide, y + tall } };
+		surface()->DrawFilledRectArray( strips, 3 );
+	}
+	else
+#endif
+	{
 	surface()->DrawFilledRect(x + cornerWide, y, x + wide - cornerWide,	y + cornerTall);
 	if ( !hollow )
 	{
@@ -6410,8 +6432,69 @@ void Panel::DrawBox(int x, int y, int wide, int tall, Color color, float normali
 		surface()->DrawFilledRect(x + wide - cornerWide, y + cornerTall, x + wide, y + tall - cornerTall);
 	}
 	surface()->DrawFilledRect(x + cornerWide, y + tall - cornerTall, x + wide - cornerWide, y + tall);
+	}
 
 	// draw the corners
+
+#ifdef PLATFORM_VITA
+	// The stock rounded corners (vgui/hud/800corner1-4) are one quarter
+	// circle mirrored four ways: draw all four from the first texture with
+	// mirrored texture coordinates, in one draw call instead of four
+	if ( ShouldDrawTopLeftCornerRounded() && ShouldDrawTopRightCornerRounded() &&
+		 ShouldDrawBottomLeftCornerRounded() && ShouldDrawBottomRightCornerRounded() )
+	{
+		// Whether a set of corner textures is the stock one, remembered by
+		// texture ids (looking up four file names per box every frame cost
+		// more than the check is worth); a handful of sets exist per HUD
+		struct VitaCornerSet_t { int ids[4]; bool bStock; };
+		static VitaCornerSet_t s_CornerSets[16];
+		static int s_nCornerSets = 0;
+		const int ids[4] = { m_nBgTextureId1, m_nBgTextureId2, m_nBgTextureId3, m_nBgTextureId4 };
+		int iSet = 0;
+		while ( iSet < s_nCornerSets && memcmp( s_CornerSets[iSet].ids, ids, sizeof( ids ) ) )
+			iSet++;
+		bool bStock;
+		if ( iSet < s_nCornerSets )
+		{
+			bStock = s_CornerSets[iSet].bStock;
+		}
+		else
+		{
+			bStock = true;
+			for ( int i = 0; i < 4 && bStock; i++ )
+			{
+				char szCorner[64];
+				szCorner[0] = 0;
+				surface()->DrawGetTextureFile( ids[i], szCorner, sizeof( szCorner ) );
+				char szWant[32];
+				Q_snprintf( szWant, sizeof( szWant ), "800corner%d", i + 1 );
+				bStock = Q_stristr( szCorner, szWant ) != NULL;
+			}
+			if ( s_nCornerSets < ARRAYSIZE( s_CornerSets ) )
+			{
+				memcpy( s_CornerSets[s_nCornerSets].ids, ids, sizeof( ids ) );
+				s_CornerSets[s_nCornerSets].bStock = bStock;
+				s_nCornerSets++;
+			}
+		}
+		if ( bStock )
+		{
+			const int rects[16] = {
+				x, y, x + cornerWide, y + cornerTall,									// top-left (as is)
+				x + wide - cornerWide, y, x + wide, y + cornerTall,						// top-right
+				x + wide - cornerWide, y + tall - cornerTall, x + wide, y + tall,		// bottom-right
+				x, y + tall - cornerTall, x + cornerWide, y + tall };					// bottom-left
+			const float tex[16] = {
+				0, 0, 1, 1,
+				1, 0, 0, 1,		// mirrored across x
+				1, 1, 0, 0,		// mirrored both ways
+				0, 1, 1, 0 };	// mirrored across y
+			surface()->DrawSetTexture( m_nBgTextureId1 );
+			surface()->DrawTexturedSubRectArray( rects, tex, 4 );
+			return;
+		}
+	}
+#endif
 
 	//=============================================================================
 	// HPE_BEGIN:
@@ -8640,6 +8723,27 @@ int VguiPanelNavigateSortedChildButtonList( void *pSortedPanels, int nDir )
 }
 
 
+#ifdef PLATFORM_VITA
+// HUD size (vgui2 Scheme.cpp scales the HUD's scheme up on the Vita): how much
+// bigger the panel's scheme is than plain proportional scaling, 1 if it isn't
+static float VitaSchemeScale( Panel *pPanel )
+{
+	if ( !pPanel->IsProportional() )
+		return 1.0f;
+	int nScaled = scheme()->GetProportionalScaledValueEx( pPanel->GetScheme(), 10000 );
+	int nPlain = scheme()->GetProportionalScaledValue( 10000 );
+	return nPlain > 0 ? (float)nScaled / nPlain : 1.0f;
+}
+
+// the panel's parent is the whole screen (HUD elements' is)
+static bool VitaParentIsScreen( int nParentSize, bool bX )
+{
+	int nWide, nTall;
+	surface()->GetScreenSize( nWide, nTall );
+	return nParentSize == ( bX ? nWide : nTall );
+}
+#endif
+
 int ComputeWide(Panel* pPanel, unsigned int& nBuildFlags, KeyValues *inResourceData, int nParentWide, int nParentTall, bool bComputingOther)
 {
 	int wide = pPanel->GetWide();
@@ -8710,6 +8814,14 @@ int ComputeWide(Panel* pPanel, unsigned int& nBuildFlags, KeyValues *inResourceD
 			{
 				// scale the width up to our screen co-ords
 				wide = scheme()->GetProportionalScaledValueEx(pPanel->GetScheme(), wide);
+#ifdef PLATFORM_VITA
+				// a screen-wide element stays as wide as the screen at any HUD size
+				if ( !(nBuildFlags & Panel::BUILDMODE_SAVE_WIDE_FULL) && wide > nParentWide &&
+					VitaSchemeScale( pPanel ) > 1.001f && VitaParentIsScreen( nParentWide, true ) )
+				{
+					wide = nParentWide;
+				}
+#endif
 			}
 			// now correct the alignment
 			if (nBuildFlags & Panel::BUILDMODE_SAVE_WIDE_FULL)
@@ -8793,6 +8905,14 @@ int ComputeTall(Panel* pPanel, unsigned int& nBuildFlags, KeyValues *inResourceD
 			{
 				// scale the height up to our screen co-ords
 				tall = scheme()->GetProportionalScaledValueEx(pPanel->GetScheme(), tall);
+#ifdef PLATFORM_VITA
+				// a full-height element stays as tall as the screen at any HUD size
+				if ( !(nBuildFlags & Panel::BUILDMODE_SAVE_TALL_FULL) && tall > nParentTall &&
+					VitaSchemeScale( pPanel ) > 1.001f && VitaParentIsScreen( nParentTall, false ) )
+				{
+					tall = nParentTall;
+				}
+#endif
 			}
 			// now correct the alignment
 			if (nBuildFlags & Panel::BUILDMODE_SAVE_TALL_FULL)
@@ -8878,6 +8998,32 @@ int ComputePos( Panel* pPanel, const char *pszInput, int &nPos, const int& nSize
 		{
 			nNewPos = nPosDelta;
 		}
+
+#ifdef PLATFORM_VITA
+		// HUD size: in a scaled-up scheme, an element placed by an absolute y
+		// on the 480-line layout keeps its distance from the nearest edge (or
+		// the middle), so the bottom row grows upward instead of off the
+		// screen; and screen-level elements stay on the screen. Which edge goes
+		// by the element's top, as the animation controller does for animated
+		// positions (AnimationController.cpp SetupPosition)
+		if ( eOp == OP_SET && pPanel->IsProportional() && VitaParentIsScreen( nParentSize, bX ) && VitaSchemeScale( pPanel ) > 1.001f )
+		{
+			if ( !bX && !( nFlags & ( nFlagRightAlign | nFlagCenterAlign | nFlagProportionalSelf | nFlagProportionalParent ) ) )
+			{
+				// pixels per layout unit
+				float flUnit = scheme()->GetProportionalScaledValueEx( pPanel->GetScheme(), 10000 ) / 10000.0f;
+				int nLayoutPos = atoi( pszInput );
+				if ( nLayoutPos > 320 )
+					nNewPos = nParentSize - (int)( ( 480 - nLayoutPos ) * flUnit );
+				else if ( nLayoutPos > 160 )
+					nNewPos = nParentSize / 2 + (int)( ( nLayoutPos - 240 ) * flUnit );
+			}
+			if ( nNewPos > nParentSize - nSize )
+				nNewPos = nParentSize - nSize;
+			if ( nNewPos < 0 )
+				nNewPos = 0;
+		}
+#endif
 
 		switch (eOp)
 		{

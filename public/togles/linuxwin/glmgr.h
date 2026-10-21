@@ -38,6 +38,16 @@
 #define HAVE_GL_ARB_SYNC 1
 #endif
 
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+// vitaGL is single-threaded: logs a backtrace (once per call site) when a GL
+// object is created off the thread that made the context, e.g. a late
+// precache in the server job under host_thread_mode 1
+void VitaCheckRenderThread( const char *pszWhat );
+#define VITA_CHECK_RENDER_THREAD( what ) VitaCheckRenderThread( what )
+#else
+#define VITA_CHECK_RENDER_THREAD( what )
+#endif
 #include "glbase.h"
 #include "glentrypoints.h"
 #include "glmdebug.h"
@@ -1817,10 +1827,17 @@ class GLMContext
 	CTSQueue<CGLMTex*> m_DeleteTextureQueue;
 };
 
+#ifdef PLATFORM_VITA
+extern "C" void so_perf_count( int counter, uint64_t amount );	// launcher_vita/so_loader.cpp
+#endif
+
 #if 1 //ifndef OSX
 
 FORCEINLINE void GLMContext::DrawRangeElements(	GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, uint baseVertex, CGLMBuffer *pIndexBuf )
 {
+#ifdef PLATFORM_VITA
+	so_perf_count( VITA_PERF_DRAW, 0 );
+#endif
 #if GL_ENABLE_INDEX_VERIFICATION
 	DrawRangeElementsNonInline( mode, start, end, count, type, indices, baseVertex, pIndexBuf );
 #else

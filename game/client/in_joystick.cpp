@@ -535,6 +535,10 @@ void CInput::Joystick_Advanced(void)
 		if ( joy_xcontroller_cfg_loaded.GetInt() < 2 )
 		{
 			engine->ClientCmd_Unrestricted( "exec 360controller.cfg" );
+#ifdef PLATFORM_VITA
+			// the port's L/R binds, which 360controller.cfg overwrote
+			engine->ClientCmd_Unrestricted( "vita_binds" );
+#endif
 			if ( IsLinux () )
 			{
 				engine->ClientCmd_Unrestricted( "exec 360controller-linux.cfg" );

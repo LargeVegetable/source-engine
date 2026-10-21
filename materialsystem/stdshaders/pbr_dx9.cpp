@@ -29,7 +29,11 @@ const Sampler_t SAMPLER_EMISSIVE = SHADER_SAMPLER11;
 const Sampler_t SAMPLER_SPECULAR = SHADER_SAMPLER12;
 
 // Convars
+#ifdef PLATFORM_VITA
+static ConVar mat_fullbright("mat_fullbright", "0", FCVAR_NONE);	// not a cheat on the Vita (engine/matsys_interface.cpp)
+#else
 static ConVar mat_fullbright("mat_fullbright", "0", FCVAR_CHEAT);
+#endif
 static ConVar mat_specular("mat_specular", "1", FCVAR_CHEAT);
 static ConVar mat_pbr_force_20b("mat_pbr_force_20b", "0", FCVAR_CHEAT);
 static ConVar mat_pbr_parallaxmap("mat_pbr_parallaxmap", "1");

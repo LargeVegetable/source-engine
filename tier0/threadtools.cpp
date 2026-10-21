@@ -409,6 +409,24 @@ void JoinTestThreads( ThreadHandle_t *pHandles )
 
 
 
+#if defined( POSIX ) && !defined( _WIN32 ) && !defined( PS3 )
+// Honors stackSize like the Win32 path does. With NULL attributes threads get
+// the pthread default, which is only 32KB on the Vita.
+static void CreatePosixSimpleThread( pthread_t *pTid, ThreadFunc_t pfnThread, void *pParam, unsigned stackSize )
+{
+	pthread_attr_t attr;
+	pthread_attr_init( &attr );
+#ifdef PLATFORM_VITA
+	pthread_attr_setstacksize( &attr, stackSize > 256u * 1024 ? stackSize : 256u * 1024 );
+#else
+	if ( stackSize )
+		pthread_attr_setstacksize( &attr, stackSize );
+#endif
+	pthread_create( pTid, &attr, ThreadProcConvert, new ThreadProcInfo_t( pfnThread, pParam ) );
+	pthread_attr_destroy( &attr );
+}
+#endif
+
 ThreadHandle_t CreateSimpleThread( ThreadFunc_t pfnThread, void *pParam, unsigned stackSize )
 {
 #ifdef _WIN32
@@ -431,7 +449,7 @@ ThreadHandle_t CreateSimpleThread( ThreadFunc_t pfnThread, void *pParam, unsigne
 	return th;
 #elif POSIX
 	pthread_t tid;
-	pthread_create( &tid, NULL, ThreadProcConvert, new ThreadProcInfo_t( pfnThread, pParam ) );
+	CreatePosixSimpleThread( &tid, pfnThread, pParam, stackSize );
 	return ( ThreadHandle_t ) tid;
 #else
 	Assert( 0 );
@@ -451,7 +469,7 @@ ThreadHandle_t CreateSimpleThread( ThreadFunc_t pfnThread, void *pParam, ThreadI
 	return (ThreadHandle_t)hThread;
 #elif POSIX
 	pthread_t tid;
-	pthread_create( &tid, NULL, ThreadProcConvert, new ThreadProcInfo_t( pfnThread, pParam ) );
+	CreatePosixSimpleThread( &tid, pfnThread, pParam, stackSize );
 	if( pID )
 		*pID = (ThreadId_t)tid;
 	return ( ThreadHandle_t ) tid;

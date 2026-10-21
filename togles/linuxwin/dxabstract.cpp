@@ -402,10 +402,15 @@ HRESULT IDirect3DDevice9::CreateTexture(UINT Width,UINT Height,UINT Levels,DWORD
 		key.m_texFlags |= kGLMTexMipped | kGLMTexMippedAuto;
 	}
 	
+	// Vita: dynamic textures are filled through a GL_PIXEL_UNPACK_BUFFER,
+	// which vitaGL doesn't have (mapping it returned NULL); without the flag
+	// they're updated from ToGL's CPU-side copy like other textures
+#ifndef PLATFORM_VITA
 	if (Usage & D3DUSAGE_DYNAMIC)
 	{
 		key.m_texFlags |= kGLMTexDynamic;
 	}
+#endif
 	
 	if (Usage & D3DUSAGE_TEXTURE_SRGB)
 	{
@@ -615,10 +620,15 @@ HRESULT IDirect3DDevice9::CreateCubeTexture(UINT EdgeLength,UINT Levels,DWORD Us
 		m_ObjectStats.m_nTotalRenderTargets++;
 	}
 		
+	// Vita: dynamic textures are filled through a GL_PIXEL_UNPACK_BUFFER,
+	// which vitaGL doesn't have (mapping it returned NULL); without the flag
+	// they're updated from ToGL's CPU-side copy like other textures
+#ifndef PLATFORM_VITA
 	if (Usage & D3DUSAGE_DYNAMIC)
 	{
 		key.m_texFlags |= kGLMTexDynamic;
 	}
+#endif
 	
 	if (Usage & D3DUSAGE_TEXTURE_SRGB)
 	{
@@ -821,10 +831,15 @@ HRESULT IDirect3DDevice9::CreateVolumeTexture(UINT Width,UINT Height,UINT Depth,
 		m_ObjectStats.m_nTotalRenderTargets++;
 	}
 	
+	// Vita: dynamic textures are filled through a GL_PIXEL_UNPACK_BUFFER,
+	// which vitaGL doesn't have (mapping it returned NULL); without the flag
+	// they're updated from ToGL's CPU-side copy like other textures
+#ifndef PLATFORM_VITA
 	if (Usage & D3DUSAGE_DYNAMIC)
 	{
 		key.m_texFlags |= kGLMTexDynamic;
 	}
+#endif
 	
 	if (Usage & D3DUSAGE_TEXTURE_SRGB)
 	{
@@ -4832,6 +4847,17 @@ HRESULT IDirect3DDevice9::CreateQuery(D3DQUERYTYPE Type,IDirect3DQuery9** ppQuer
 {
 	GL_BATCH_PERF_CALL_TIMER;
 	GL_PUBLIC_ENTRYPOINT_CHECKS( this );
+#ifdef PLATFORM_VITA
+	// No occlusion queries on Vita: vitaGL has 128 query objects (Source uses
+	// one per glow sprite and beam, and crashed once they ran out), and
+	// waiting on query results stalls the CPU on the GPU. Without them the
+	// engine treats sprite glows as unoccluded. Event queries (fences) stay.
+	if ( Type == D3DQUERYTYPE_OCCLUSION )
+	{
+		*ppQuery = NULL;
+		return D3DERR_NOTAVAILABLE;
+	}
+#endif
 	if (m_ctx->Caps().m_hasOcclusionQuery)
 	{
 		m_ObjectStats.m_nTotalQueries++;

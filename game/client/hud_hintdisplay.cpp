@@ -596,6 +596,13 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 					label->SetText( friendlyName );
 				}
 			}
+#ifdef PLATFORM_VITA
+			else if ( UTIL_VitaButtonForBinding( binding ) )
+			{
+				// the Vita button's glyph or name (cdll_util.cpp)
+				label->SetText( UTIL_VitaButtonForBinding( binding ) );
+			}
+#endif
 			else
 			{
 				const char *key = engine->Key_LookupBinding( *binding == '+' ? binding + 1 : binding );

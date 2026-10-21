@@ -892,6 +892,52 @@ const char * UTIL_SafeName( const char *oldName )
 //			input buffer is assumed, or you can pass the size of the input buffer if
 //			not NULL-terminated.
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// The Vita button bound to a command, as hints show it: the PlayStation
+// shapes, L/R, the D-pad's arrows, START/SELECT and the rear touchpad halves
+// (SDL names the face buttons like a 360 pad's: cross A, circle B, square X,
+// triangle Y). Looked up before keyboard keys, which HL2's default config
+// also binds and Key_LookupBinding would find first. NULL if no button is
+//-----------------------------------------------------------------------------
+const wchar_t *UTIL_VitaButtonForBinding( const char *pszBinding )
+{
+	static const struct { ButtonCode_t code; const wchar_t *pName; } s_Buttons[] =
+	{
+		{ KEY_XBUTTON_A, L"\u2715" }, { KEY_XBUTTON_B, L"\u25CB" }, { KEY_XBUTTON_X, L"\u25A1" }, { KEY_XBUTTON_Y, L"\u25B3" },
+		{ KEY_XBUTTON_LEFT_SHOULDER, L"L" }, { KEY_XBUTTON_RIGHT_SHOULDER, L"R" },
+		{ KEY_XBUTTON_UP, L"\u2191" }, { KEY_XBUTTON_DOWN, L"\u2193" }, { KEY_XBUTTON_LEFT, L"\u2190" }, { KEY_XBUTTON_RIGHT, L"\u2192" },
+		{ KEY_XBUTTON_START, L"START" }, { KEY_XBUTTON_BACK, L"SELECT" },
+		{ KEY_XBUTTON_STICK1, L"REAR TOUCH LEFT" }, { KEY_XBUTTON_STICK2, L"REAR TOUCH RIGHT" },
+	};
+	if ( !pszBinding || !pszBinding[0] )
+		return NULL;
+	if ( pszBinding[0] == '+' )
+		pszBinding++;
+	for ( int i = 0; i < ARRAYSIZE( s_Buttons ); i++ )
+	{
+		const char *pszBound = engine->Key_BindingForKey( s_Buttons[i].code );
+		if ( !pszBound )
+			continue;
+		if ( pszBound[0] == '+' )
+			pszBound++;
+		if ( !V_stricmp( pszBound, pszBinding ) )
+			return s_Buttons[i].pName;
+	}
+	// moving and looking are the sticks' axes, not buttons
+	static const char *s_pszMove[] = { "forward", "back", "moveleft", "moveright" };
+	static const char *s_pszLook[] = { "left", "right", "lookup", "lookdown" };
+	for ( int i = 0; i < ARRAYSIZE( s_pszMove ); i++ )
+	{
+		if ( !V_stricmp( pszBinding, s_pszMove[i] ) )
+			return L"LEFT STICK";
+		if ( !V_stricmp( pszBinding, s_pszLook[i] ) )
+			return L"RIGHT STICK";
+	}
+	return NULL;
+}
+#endif
+
 void UTIL_ReplaceKeyBindings( const wchar_t *inbuf, int inbufsizebytes, OUT_Z_BYTECAP(outbufsizebytes) wchar_t *outbuf, int outbufsizebytes )
 {
 	Assert( outbufsizebytes >= sizeof(outbuf[0]) );
@@ -927,6 +973,19 @@ void UTIL_ReplaceKeyBindings( const wchar_t *inbuf, int inbufsizebytes, OUT_Z_BY
 				// lookup key names
 				char binding[64];
 				g_pVGuiLocalize->ConvertUnicodeToANSI( token, binding, sizeof(binding) );
+
+#ifdef PLATFORM_VITA
+				// the Vita button's glyph or name, when one is bound to it
+				const wchar_t *pVitaButton = UTIL_VitaButtonForBinding( binding );
+				if ( pVitaButton )
+				{
+					outbuf[pos] = '\0';
+					wcscat( outbuf, pVitaButton );
+					pos += wcslen( pVitaButton );
+					++inbuf;
+					continue;
+				}
+#endif
 
 				const char *key = engine->Key_LookupBinding( *binding == '+' ? binding + 1 : binding );
 				if ( !key )

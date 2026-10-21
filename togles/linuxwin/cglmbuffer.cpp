@@ -431,6 +431,7 @@ void glBufferSubDataMaxSize( GLenum target, GLintptr offset, GLsizeiptr size, co
 
 CGLMBuffer::CGLMBuffer( GLMContext *pCtx, EGLMBufferType type, uint size, uint options )
 {
+	VITA_CHECK_RENDER_THREAD( "buffer created" );
 	m_pCtx = pCtx;
 	m_type = type;
 	

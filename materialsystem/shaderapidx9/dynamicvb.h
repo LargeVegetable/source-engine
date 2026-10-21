@@ -668,6 +668,12 @@ inline bool CVertexBuffer::HasEnoughRoom( int numVertices ) const
 {
 #if defined( _X360 )
 	return numVertices <= m_VertexCount; //the ring buffer will free room as needed
+#elif defined( PLATFORM_VITA )
+	// Mesh builders add the first vertex to 16-bit indices, so a lock must
+	// also end below vertex 65536: the shared buffer holds more than that for
+	// vertices under 24 bytes
+	return (NextLockOffset() + (numVertices * m_VertexSize)) <= m_nBufferSize &&
+		NextLockOffset() / m_VertexSize + numVertices <= 65536;
 #else
 	return (NextLockOffset() + (numVertices * m_VertexSize)) <= m_nBufferSize;
 #endif

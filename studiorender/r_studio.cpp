@@ -208,7 +208,13 @@ IMaterial* CStudioRender::R_StudioSetupSkinAndLighting( IMatRenderContext *pRend
 	lighting = R_StudioComputeLighting( pMaterial, materialFlags, pColorMeshes );
 	if ( lighting == LIGHTING_MOUTH )
 	{
+#ifdef PLATFORM_VITA
+		// teeth come with facial animation: a face drawn without flexes
+		// (engine r_vita_flex_dist) keeps its mouth closed over them
+		if ( !m_pRC->m_Config.bTeeth || !m_pRC->m_Config.bFlex || !R_TeethAreVisible() )
+#else
 		if ( !m_pRC->m_Config.bTeeth || !R_TeethAreVisible() )
+#endif
 			return NULL;
 		// skin it and light it, but only if we need to.
 		if ( m_pRC->m_Config.m_bSupportsVertexAndPixelShaders )

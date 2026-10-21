@@ -77,6 +77,8 @@
 // Projective textures
 #include "C_Env_Projected_Texture.h"
 
+#include "vita_perf.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1030,6 +1032,7 @@ void CViewRender::DrawRenderablesInList( CUtlVector< IClientRenderable * > &list
 void CViewRender::DrawViewModels( const CViewSetup &view, bool drawViewmodel )
 {
 	VPROF( "CViewRender::DrawViewModel" );
+	VITA_SECTION_SCOPE( "cl viewmodel" );
 	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
 
 #ifdef PORTAL //in portal, we'd like a copy of the front buffer without the gun in it for use with the depth doubler
@@ -3088,6 +3091,10 @@ bool CViewRender::DrawOneMonitor( ITexture *pRenderTarget, int cameraNum, C_Poin
 	return true;
 }
 
+#ifdef PLATFORM_VITA
+static ConVar vita_monitor_interval( "vita_monitor_interval", "2", FCVAR_NONE, "Vita: redraw point_camera monitors (Breencast screens) every N frames (1 = every frame)" );
+#endif
+
 void CViewRender::DrawMonitors( const CViewSetup &cameraView )
 {
 #ifdef PORTAL
@@ -3100,6 +3107,19 @@ void CViewRender::DrawMonitors( const CViewSetup &cameraView )
 	C_PointCamera *pCameraEnt = GetPointCameraList();
 	if ( !pCameraEnt )
 		return;
+
+#ifdef PLATFORM_VITA
+	// Each monitor is a whole extra scene (~2-3 ms per frame near the
+	// Breencast screens): redraw them every vita_monitor_interval frames,
+	// the render target keeps the last image. A monitor that wasn't drawn
+	// last time (just came into view) is drawn right away
+	static bool s_bVitaDrewMonitors = false;
+	static int s_nVitaMonitorFrame = 0;
+	const int nVitaInterval = vita_monitor_interval.GetInt();
+	if ( nVitaInterval > 1 && s_bVitaDrewMonitors && ( ++s_nVitaMonitorFrame % nVitaInterval ) != 0 )
+		return;
+	s_nVitaMonitorFrame = 0;
+#endif
 
 	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
 
@@ -3126,6 +3146,10 @@ void CViewRender::DrawMonitors( const CViewSetup &cameraView )
 
 		++cameraNum;
 	}
+
+#ifdef PLATFORM_VITA
+	s_bVitaDrewMonitors = cameraNum > 0;
+#endif
 
 	if ( IsX360() && cameraNum > 0 )
 	{
@@ -3329,6 +3353,7 @@ void CRendering3dView::BuildWorldRenderLists( bool bDrawEntities, int iForceView
 	bool bUseCacheIfEnabled /* = true */, bool bShadowDepth /* = false */, float *pReflectionWaterHeight /*= NULL*/ )
 {
 	VPROF_BUDGET( "BuildWorldRenderLists", VPROF_BUDGETGROUP_WORLD_RENDERING );
+	VITA_SECTION_SCOPE( "cl worldlists" );
 
     // @MULTICORE (toml 8/18/2006): to address....
 	extern void UpdateClientRenderableInPVSStatus();
@@ -3425,6 +3450,7 @@ static inline void UpdateBrushModelLightmap( IClientRenderable *pEnt )
 void CRendering3dView::BuildRenderableRenderLists( int viewID )
 {
 	MDLCACHE_CRITICAL_SECTION();
+	VITA_SECTION_SCOPE( "cl renderablelists" );
 
 	if ( viewID != VIEW_SHADOW_DEPTH_TEXTURE )
 	{
@@ -3490,6 +3516,7 @@ void CRendering3dView::DrawWorld( float waterZAdjust )
 {
 	VPROF_INCREMENT_COUNTER( "RenderWorld", 1 );
 	VPROF_BUDGET( "DrawWorld", VPROF_BUDGETGROUP_WORLD_RENDERING );
+	VITA_SECTION_SCOPE( "cl drawworld" );
 	if( !r_drawopaqueworld.GetBool() )
 	{
 		return;
@@ -3837,6 +3864,13 @@ static void DrawOpaqueRenderables_DrawBrushModels( CClientRenderablesList::CEntr
 	}
 }
 
+#ifdef PLATFORM_VITA
+// Each static prop costs ~220 us of render thread (its model draw) plus the
+// engine's lighting setup; the slowest scenes draw 40+. Set from the options
+// menu (Video > Distant props: All 0, Normal 3, Fewer 6)
+static ConVar vita_staticprop_minpixels( "vita_staticprop_minpixels", "3", FCVAR_NONE, "Vita: don't draw static props smaller than this radius on screen, in pixels of a 640-wide view whatever the render size (0 = draw all)" );
+#endif
+
 static void DrawOpaqueRenderables_DrawStaticProps( CClientRenderablesList::CEntry *pEntitiesBegin, CClientRenderablesList::CEntry *pEntitiesEnd, ERenderDepthMode DepthMode )
 {
 	if ( pEntitiesEnd == pEntitiesBegin )
@@ -3851,12 +3885,43 @@ static void DrawOpaqueRenderables_DrawStaticProps( CClientRenderablesList::CEntr
 	
 	int numScheduled = 0, numAvailable = MAX_STATICS_PER_BATCH;
 
+#ifdef PLATFORM_VITA
+	// Each static prop costs at least one draw call (~0.14 ms of CPU on the
+	// Vita; the canals draw 50-90 a frame): skip those whose bounding sphere
+	// would be under vita_staticprop_minpixels in radius on screen
+	float flVitaMinRatioSq = 0.0f;
+	Vector vecVitaView = CurrentViewOrigin();
+	const float flVitaMinPixels = vita_staticprop_minpixels.GetFloat();	// options menu: Video > Distant props
+	if ( flVitaMinPixels > 0.0f && view && view->GetViewSetup() )
+	{
+		const CViewSetup *pVitaView = view->GetViewSetup();
+		// measured against a 640-wide view, so the cull (and the draw count)
+		// doesn't change with the render size
+		const float flHalfWidth = 320.0f;
+		float flTanHalfFov = tanf( DEG2RAD( pVitaView->fov ) * 0.5f );
+		float flRatio = flVitaMinPixels * flTanHalfFov / flHalfWidth;	// radius / distance
+		flVitaMinRatioSq = flRatio * flRatio;
+	}
+#endif
+
 	for( CClientRenderablesList::CEntry *itEntity = pEntitiesBegin; itEntity < pEntitiesEnd; ++ itEntity )
 	{
 		if ( itEntity->m_pRenderable )
 			/**/;
 		else
 			continue;
+
+#ifdef PLATFORM_VITA
+		if ( flVitaMinRatioSq > 0.0f )
+		{
+			Vector vecMins, vecMaxs;
+			itEntity->m_pRenderable->GetRenderBounds( vecMins, vecMaxs );
+			float flRadiusSq = ( vecMaxs - vecMins ).LengthSqr() * 0.25f;
+			float flDistSq = ( itEntity->m_pRenderable->GetRenderOrigin() - vecVitaView ).LengthSqr();
+			if ( flRadiusSq < flVitaMinRatioSq * flDistSq )
+				continue;
+		}
+#endif
 
 		if ( g_pStudioStatsEntity != NULL && g_CurrentViewID == VIEW_MAIN && itEntity->m_pRenderable == g_pStudioStatsEntity )
 		{
@@ -3889,6 +3954,7 @@ static void DrawOpaqueRenderables_Range( CClientRenderablesList::CEntry *pEntiti
 void CRendering3dView::DrawOpaqueRenderables( ERenderDepthMode DepthMode )
 {
 	VPROF_BUDGET("CViewRender::DrawOpaqueRenderables", "DrawOpaqueRenderables" );
+	VITA_SECTION_SCOPE( "cl opaque renderables" );
 
 	if( !r_drawopaquerenderables.GetBool() )
 		return;
@@ -4294,6 +4360,7 @@ void CRendering3dView::DrawNoZBufferTranslucentRenderables( void )
 //-----------------------------------------------------------------------------
 void CRendering3dView::DrawTranslucentRenderables( bool bInSkybox, bool bShadowDepth )
 {
+	VITA_SECTION_SCOPE( "cl translucent" );
 	const ClientWorldListInfo_t& info = *m_pWorldListInfo;
 
 #ifdef PORTAL //if we're in the portal mod, we need to make a detour so we can render portal views using stencil areas

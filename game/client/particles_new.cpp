@@ -16,8 +16,29 @@
 #include "model_types.h"
 #include "vprof.h"
 #include "input.h"
+#include "vita_perf.h"
 
 extern ConVar cl_particleeffect_aabb_buffer;
+
+#ifdef PLATFORM_VITA
+// Particles drawn, for the frame line's particle counts (fire separately:
+// env_fire_* and burning_*)
+static int VitaActiveParticles( CParticleCollection *pCollection )
+{
+	int nCount = pCollection->m_nActiveParticles;
+	for ( CParticleCollection *pChild = pCollection->m_Children.m_pHead; pChild; pChild = pChild->m_pNext )
+		nCount += VitaActiveParticles( pChild );
+	return nCount;
+}
+
+static void VitaCountParticlesDrawn( CParticleCollection *pCollection, const char *pszName )
+{
+	const int nCount = VitaActiveParticles( pCollection );
+	so_perf_count( VITA_PERF_PARTICLES, nCount );
+	if ( pszName && ( !V_strnicmp( pszName, "env_fire", 8 ) || !V_strnicmp( pszName, "burning", 7 ) ) )
+		so_perf_count( VITA_PERF_FIRE_PARTICLES, nCount );
+}
+#endif
 
 //extern ConVar cl_particle_show_bbox;
 //extern ConVar cl_particle_show_bbox_cost;
@@ -572,6 +593,9 @@ int CNewParticleEffect::DrawModel( int flags )
 		Render( pRenderContext, IsTwoPass(), pCameraObject );
 		pRenderContext->MatrixMode( MATERIAL_MODEL );
 		pRenderContext->PopMatrix();
+#ifdef PLATFORM_VITA
+		VitaCountParticlesDrawn( this, m_pDef->GetName() );
+#endif
 	}
 	else
 	{

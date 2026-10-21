@@ -449,6 +449,8 @@ INLINE_ON_PS3 void CThread::Yield()
 #elif defined( _PS3 )
 	// sys_ppu_thread_yield doesn't seem to function properly, so sleep instead.
 	sys_timer_usleep( 60 );
+#elif defined( PLATFORM_VITA )
+	usleep( 60 );	// sched_yield() sleeps 1 ms here
 #elif defined(POSIX)
 	sched_yield();
 #endif

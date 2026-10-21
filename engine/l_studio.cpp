@@ -55,6 +55,8 @@
 #include "shaderapi/ishaderapi.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
+#include "vita_perf.h"
+
 #include "tier0/memdbgon.h"
 
 // #define VISUALIZE_TIME_AVERAGE 1
@@ -96,6 +98,23 @@ static ConVar r_itemblinkmax( "r_itemblinkmax", ".3", FCVAR_CHEAT );
 static ConVar r_itemblinkrate( "r_itemblinkrate", "4.5", FCVAR_CHEAT );
 static ConVar r_proplightingpooling( "r_proplightingpooling", "-1.0", FCVAR_CHEAT, "0 - off, 1 - static prop color meshes are allocated from a single shared vertex buffer (on hardware that supports stream offset)" );
 
+// Static props' baked per-vertex lighting (the .vhv color meshes, drawn as a
+// second vertex stream). With it a few props drew black (payphone, bin); with
+// the light cache path instead (0) trees, poles and skybox buildings did too,
+// so it stays on; the switch remains for testing
+#ifdef PLATFORM_VITA
+static ConVar r_vita_staticpropvertexlighting( "r_vita_staticpropvertexlighting", "1", FCVAR_NONE, "Vita: static props use their baked per-vertex lighting (1, default; a few drew black) or the light cache (0; most drew black). Takes effect on map load" );
+static inline bool SupportsStaticPropColorMeshes()
+{
+	return r_vita_staticpropvertexlighting.GetBool() && g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream();
+}
+#else
+static inline bool SupportsStaticPropColorMeshes()
+{
+	return g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream();
+}
+#endif
+
 //-----------------------------------------------------------------------------
 // StudioRender config 
 //-----------------------------------------------------------------------------
@@ -111,6 +130,9 @@ static ConVar	r_nosw			( "r_nosw", "0", FCVAR_CHEAT );
 static ConVar	r_teeth			( "r_teeth", "1" );
 static ConVar	r_drawentities	( "r_drawentities", "1", FCVAR_CHEAT );
 static ConVar	r_flex			( "r_flex", "1" );
+#ifdef PLATFORM_VITA
+static ConVar	r_vita_flex_dist( "r_vita_flex_dist", "256", FCVAR_NONE, "Vita: facial animation (flexes and teeth) only for faces within this distance of the camera; farther faces draw as with r_flex 0" );
+#endif
 static ConVar	r_eyes			( "r_eyes", "1" );
 static ConVar	r_skin			( "r_skin", "0", FCVAR_CHEAT );
 static ConVar	r_modelwireframedecal ( "r_modelwireframedecal", "0", FCVAR_CHEAT );
@@ -2090,6 +2112,10 @@ void CModelRender::DrawModelExecute( const DrawModelState_t &state, const ModelR
 {
 #ifndef SWDS
 	bool bShadowDepth = (pInfo.flags & STUDIO_SHADOWDEPTHTEXTURE) != 0;
+#ifdef PLATFORM_VITA
+	if ( !bShadowDepth )
+		so_perf_count( VITA_PERF_MODEL_DRAW, 0 );
+#endif
 	bool bSSAODepth = ( pInfo.flags & STUDIO_SSAODEPTHTEXTURE ) != 0;
 
 	// Bail if we're rendering into shadow depth map and this model doesn't cast shadows
@@ -2123,7 +2149,7 @@ void CModelRender::DrawModelExecute( const DrawModelState_t &state, const ModelR
 								( state.m_pStudioHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP ) && 
 								( !bUsesBumpmapping ) && 
 								( pInfo.instance != MODEL_INSTANCE_INVALID ) &&
-								g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream();
+								SupportsStaticPropColorMeshes();
 
 	bool bVertexLit = ( pInfo.pModel->flags & MODELFLAG_VERTEXLIT ) != 0;
 
@@ -2218,6 +2244,16 @@ void CModelRender::DrawModelExecute( const DrawModelState_t &state, const ModelR
 	// Get perf stats if we are going to use them.
 	int overlayVal = r_drawmodelstatsoverlay.GetInt();
 	int drawFlags = state.m_drawFlags;
+
+#ifdef PLATFORM_VITA
+	// Facial animation only where it can be seen: a face farther than
+	// r_vita_flex_dist (~15 px tall at 640x368) draws as with r_flex 0, so
+	// crowds and fights cost what they did; close faces (conversations) get
+	// flexes, and teeth with them (studiorender's R_StudioSetupSkinAndLighting).
+	// The client computes the weights either way (C_BaseFlex::SetupWeights)
+	if ( nFlexCount > 0 && CurrentViewOrigin().DistToSqr( pInfo.origin ) > r_vita_flex_dist.GetFloat() * r_vita_flex_dist.GetFloat() )
+		drawFlags |= STUDIORENDER_DRAW_NO_FLEXES;
+#endif
 
 	if ( bShadowDepth )
 	{
@@ -2514,6 +2550,10 @@ int	CModelRender::DrawModelExStaticProp( ModelRenderInfo_t &pInfo )
 {
 #ifndef SWDS
 	bool bShadowDepth = ( pInfo.flags & STUDIO_SHADOWDEPTHTEXTURE ) != 0;
+#ifdef PLATFORM_VITA
+	if ( !bShadowDepth )
+		so_perf_count( VITA_PERF_STATIC_PROP, 1 );
+#endif
 
 #if _DEBUG
 	if ( (char*)pInfo.pRenderable < (char*)1024 )
@@ -2594,7 +2634,7 @@ int	CModelRender::DrawModelExStaticProp( ModelRenderInfo_t &pInfo )
 		( state.m_pStudioHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP ) && 
 		( !bUsesBumpmapping ) && 
 		( pInfo.instance != MODEL_INSTANCE_INVALID ) &&
-		g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream() );
+		SupportsStaticPropColorMeshes() );
 
 	bool bVertexLit = ( pInfo.pModel->flags & MODELFLAG_VERTEXLIT ) != 0;
 	bool bNeedsEnvCubemap = r_showenvcubemap.GetInt() || ( pInfo.pModel->flags & MODELFLAG_STUDIOHDR_USES_ENV_CUBEMAP );
@@ -2804,6 +2844,10 @@ ConVar r_staticprop_lod("r_staticprop_lod", "-1");
 int CModelRender::DrawStaticPropArrayFast( StaticPropRenderInfo_t *pProps, int count, bool bShadowDepth )
 {
 #ifndef SWDS
+#ifdef PLATFORM_VITA
+	if ( !bShadowDepth )
+		so_perf_count( VITA_PERF_STATIC_PROP, count );
+#endif
 	MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
 	CMatRenderContextPtr pRenderContext( materials );
 	const int MAX_OBJECTS = 1024;
@@ -3328,7 +3372,7 @@ void CModelRender::InitColormeshParams( ModelInstance_t &instance, studiohwdata_
 // FIXME? : Move this to StudioRender?
 CColorMeshData *CModelRender::FindOrCreateStaticPropColorData( ModelInstanceHandle_t handle )
 {
-	if ( handle == MODEL_INSTANCE_INVALID || !g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream() )
+	if ( handle == MODEL_INSTANCE_INVALID || !SupportsStaticPropColorMeshes() )
 	{
 		// the card can't support it
 		return NULL;
@@ -3621,7 +3665,7 @@ void CModelRender::ValidateStaticPropColorData( ModelInstanceHandle_t handle )
 	ModelInstance_t *pInstance = &m_ModelInstances[handle];
 	IHandleEntity* pProp = pInstance->m_pRenderable->GetIClientUnknown();
 
-	if ( !g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream() || !StaticPropMgr()->IsStaticProp( pProp ) )
+	if ( !SupportsStaticPropColorMeshes() || !StaticPropMgr()->IsStaticProp( pProp ) )
 	{
 		// can't support it or not a static prop
 		return;
@@ -4430,7 +4474,7 @@ bool CModelRender::RecomputeStaticLighting( ModelInstanceHandle_t handle )
 		return false;
 	}
 
-	if ( !g_pMaterialSystemHardwareConfig->SupportsColorOnSecondStream() )
+	if ( !SupportsStaticPropColorMeshes() )
 	{
 		// static lighting not supported, but callers can proceed
 		return true;

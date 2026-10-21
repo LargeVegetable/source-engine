@@ -171,6 +171,13 @@ bool CVGuiSystemModuleLoader::LoadPlatformModules(CreateInterfaceFn *factorylist
 		}
 
 
+#ifdef PLATFORM_VITA
+		// no server browser in a single-player port: its module is 1.6 MB of
+		// memory (ActivateModule("Servers") finds nothing and does nothing)
+		if ( dllPath && Q_stristr( dllPath, "ServerBrowser" ) )
+			continue;
+#endif
+
 		// load the module (LoadModule calls GetLocalCopy() under steam)
 		CSysModule *mod = g_pFullFileSystem->LoadModule(dllPath, "EXECUTABLE_PATH");
 		if (!mod)

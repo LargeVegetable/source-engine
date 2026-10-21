@@ -659,6 +659,26 @@ CPhysConvex	*CPhysicsCollision::ConvexFromVertsFast( Vector **pVerts, int vertCo
 	}
 	points.clear();
 
+#ifdef PLATFORM_VITA
+	// qhull hull builds fail on the Vita for some inputs (seen with
+	// displacement hulls); make any other failure visible in the log
+	if ( !pLedge && vertCount >= 4 )
+	{
+		static int s_nFailures = 0;
+		if ( s_nFailures++ < 16 )
+		{
+			Vector mins = *pVerts[0], maxs = *pVerts[0];
+			for ( i = 1; i < vertCount; i++ )
+			{
+				VectorMin( mins, *pVerts[i], mins );
+				VectorMax( maxs, *pVerts[i], maxs );
+			}
+			Warning( "[vita] ConvexFromVertsFast failed: %d verts, bounds (%.1f %.1f %.1f) - (%.1f %.1f %.1f)\n",
+				vertCount, mins.x, mins.y, mins.z, maxs.x, maxs.y, maxs.z );
+		}
+	}
+#endif
+
 	return reinterpret_cast<CPhysConvex *>(pLedge);
 }
 

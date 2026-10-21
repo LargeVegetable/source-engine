@@ -14,7 +14,13 @@
 #include "engine/audio/snd_mix_buf.h"
 
 // sound engine rate defines
+#ifdef PLATFORM_VITA
+// Half the mixing work: 22k sources skip the 2x upsample, 44k sources are
+// resampled down by the mixer (the paths under SOUND_DMA_SPEED > SOUND_22k)
+#define SOUND_DMA_SPEED		22050		// hardware playback rate
+#else
 #define SOUND_DMA_SPEED		44100		// hardware playback rate
+#endif
 
 #define SOUND_11k			11025		// 11khz sample rate
 #define SOUND_22k			22050		// 22khz sample rate

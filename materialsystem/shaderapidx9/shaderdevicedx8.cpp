@@ -1091,6 +1091,13 @@ bool CShaderDeviceMgrDx8::ComputeCapsFromD3D( HardwareCaps_t *pCaps, int nAdapte
 		pCaps->m_HDRType = HDR_TYPE_NONE;
 	}
 
+#ifdef PLATFORM_VITA
+	// HDR doubles lightmap and render target memory (16-bit channels), which
+	// the Vita doesn't have; HDR maps fall back to their LDR lighting
+	pCaps->m_MaxHDRType = HDR_TYPE_NONE;
+	pCaps->m_HDRType = HDR_TYPE_NONE;
+#endif
+
 	pCaps->m_bColorOnSecondStream = caps.MaxStreams > 1;
 
 	pCaps->m_bSupportsStreamOffset = ( ( caps.DevCaps2 & D3DDEVCAPS2_STREAMOFFSET ) &&	// Tie these caps together since we want to filter out

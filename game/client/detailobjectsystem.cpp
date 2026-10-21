@@ -261,7 +261,11 @@ protected:
 #endif
 };
 
+#ifdef PLATFORM_VITA
+static ConVar mat_fullbright( "mat_fullbright", "0", FCVAR_NONE ); // hook into engine's cvars..
+#else
 static ConVar mat_fullbright( "mat_fullbright", "0", FCVAR_CHEAT ); // hook into engine's cvars..
+#endif
 extern ConVar r_DrawDetailProps;
 
 

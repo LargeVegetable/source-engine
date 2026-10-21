@@ -394,6 +394,12 @@ public:
 	// handles support for software cursors
 	virtual void SetSoftwareCursor( bool bUseSoftwareCursor ) = 0;
 	virtual void PaintSoftwareCursor() = 0;
+#ifdef PLATFORM_VITA
+	// Vita: textured sub-rects of the bound texture in one draw call (each
+	// VGUI draw costs ~0.1 ms of CPU). pRects: x0 y0 x1 y1 per rect; pTex:
+	// s0 t0 s1 t1 per rect (0..1 of the texture; s0 > s1 mirrors)
+	virtual void DrawTexturedSubRectArray( const int *pRects, const float *pTex, int nRects ) = 0;
+#endif
 
 
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

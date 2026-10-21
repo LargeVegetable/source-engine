@@ -61,6 +61,11 @@ public:
 	// Gets at the scheme's name
 	const char *GetName() { return tag; }
 	const char *GetFileName() { return fileName; }
+#ifdef PLATFORM_VITA
+	// HUD size: how much bigger than plain proportional scaling this scheme is
+	float GetVitaScale() { return m_flVitaScale; }
+	float m_flVitaScale;
+#endif
 
 	char const *GetFontName( const HFont& font );
 
@@ -357,6 +362,9 @@ CScheme::CScheme()
 	m_SizingPanel = 0;
 	m_nScreenWide = -1;
 	m_nScreenTall = -1;
+#ifdef PLATFORM_VITA
+	m_flVitaScale = 1.0f;
+#endif
 }
 
 // first scheme loaded becomes the default scheme, and all subsequent loaded scheme are derivitives of that
@@ -794,9 +802,21 @@ void CScheme::LoadFonts()
 //-----------------------------------------------------------------------------
 // Purpose: Reloads all scheme fonts
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+extern "C" float so_hud_scale( void );
+#endif
+
 void CScheme::ReloadFontGlyphs()
 {
 	COM_TimestampedLog( "ReloadFontGlyphs(): Start" );
+
+#ifdef PLATFORM_VITA
+	// The HUD's scheme is bigger on the Vita (the HUD size option, client
+	// vita_hud_size): its fonts and proportional panel sizes and positions
+	// (vgui_controls Panel.cpp keeps positions on the screen). Read here, so
+	// a hud_reloadscheme picks up a new size
+	m_flVitaScale = Q_stristr( fileName, "ClientScheme" ) ? so_hud_scale() : 1.0f;
+#endif
 
 	// get our current resolution
 	if ( m_SizingPanel != 0 )
@@ -895,6 +915,13 @@ void CScheme::ReloadFontGlyphs()
 				scalex = g_Scheme.GetProportionalScaledValueEx( this, scalex * 10000.0f ) * 0.0001f;
 				scaley = g_Scheme.GetProportionalScaledValueEx( this, scaley * 10000.0f ) * 0.0001f;
 			}
+#ifdef PLATFORM_VITA
+			else if ( m_FontAliases[i].m_bProportional && m_flVitaScale != 1.0f )
+			{
+				// a resolution-filtered font still grows with the HUD size
+				tall = (int)( tall * m_flVitaScale + 0.5f );
+			}
+#endif
 
 			// clip the font size so that fonts can't be too big
 			if ( tall > 127 )
@@ -1160,6 +1187,11 @@ int CSchemeManager::GetProportionalNormalizedValue(int scaledValue)
 // use these for font, image and panel size scaling (they all use the pixel height of the display for scaling)
 int CSchemeManager::GetProportionalScaledValueEx( CScheme *pScheme, int normalizedValue )
 {
+#ifdef PLATFORM_VITA
+	// HUD size: values in a scaled scheme grow before the usual scaling
+	if ( pScheme->GetVitaScale() != 1.0f )
+		normalizedValue = (int)( normalizedValue * pScheme->GetVitaScale() );
+#endif
 	VPANEL sizing = pScheme->GetSizingPanel();
 	if ( !sizing )
 	{
@@ -1174,14 +1206,22 @@ int CSchemeManager::GetProportionalScaledValueEx( CScheme *pScheme, int normaliz
 int CSchemeManager::GetProportionalNormalizedValueEx( CScheme *pScheme, int scaledValue )
 {
 	VPANEL sizing = pScheme->GetSizingPanel();
+	int nNormalized;
 	if ( !sizing )
 	{
-		return GetProportionalNormalizedValue( scaledValue );
+		nNormalized = GetProportionalNormalizedValue( scaledValue );
 	}
-
-	int w, h;
-	g_pIPanel->GetSize( sizing, w, h );
-	return GetProportionalNormalizedValue_( w, h, scaledValue );
+	else
+	{
+		int w, h;
+		g_pIPanel->GetSize( sizing, w, h );
+		nNormalized = GetProportionalNormalizedValue_( w, h, scaledValue );
+	}
+#ifdef PLATFORM_VITA
+	if ( pScheme->GetVitaScale() != 1.0f )
+		nNormalized = (int)( nNormalized / pScheme->GetVitaScale() );
+#endif
+	return nNormalized;
 }
 
 int CSchemeManager::GetProportionalScaledValueEx( HScheme scheme, int normalizedValue )

@@ -55,6 +55,34 @@ extern short g_sModelIndexFireball; // Echh...
 
 ConVar sk_apc_health( "sk_apc_health", "750" );
 
+#ifdef PLATFORM_VITA
+// Vita: APCs jitter and bounce here, and halving the physics step
+// didn't help, so they're locked in place. They still aim and fire;
+// scripted drives don't move them. Not while a dropship carries one: once it's
+// been set down (on its wheels, or at rest). The jeep and the airboat are
+// other classes and aren't affected
+static ConVar vita_apc_lock( "vita_apc_lock", "1", FCVAR_NONE, "Vita: lock APCs in place (1, default) or let them drive (0)" );
+
+static void VitaLockAPC( CPropAPC *pAPC, CFourWheelVehiclePhysics *pPhysics )
+{
+	if ( !vita_apc_lock.GetBool() || pAPC->GetParent() )
+		return;
+	IPhysicsObject *pBody = pAPC->VPhysicsGetObject();
+	if ( !pBody || !pBody->IsMotionEnabled() || pBody->GetShadowController() )
+		return;
+	if ( pPhysics->GetVehicleOperatingParams().wheelsInContact < 2 && !pBody->IsAsleep() )
+		return;	// still falling after a dropship let go
+	Vector vecZero( 0.0f, 0.0f, 0.0f );
+	AngularImpulse angNone( 0.0f, 0.0f, 0.0f );
+	pBody->SetVelocity( &vecZero, &angNone );
+	pBody->EnableMotion( false );
+	pPhysics->DisableMotion();	// the wheels
+	static int s_nLogged = 0;
+	if ( s_nLogged++ < 20 )
+		Msg( "[vita] APC %s locked in place\n", pAPC->GetDebugName() );
+}
+#endif
+
 
 #define APC_MAX_CHUNKS	3
 static const char *s_pChunkModelName[APC_MAX_CHUNKS] = 
@@ -647,6 +675,10 @@ void CPropAPC::Think( void )
 		m_VehiclePhysics.SetHandbrake( true );
 		m_VehiclePhysics.Think();
 	}
+
+#ifdef PLATFORM_VITA
+	VitaLockAPC( this, &m_VehiclePhysics );
+#endif
 
 	StudioFrameAdvance();
 

@@ -187,7 +187,14 @@ public:
 	CSaveMemory()
 	{
 		MEM_ALLOC_CREDIT();
+#ifdef PLATFORM_VITA
+		// no initial commit: rounded to whole megabytes it held 3 MB of
+		// kernel memory through play with nothing in it; saves and
+		// loads commit what they need and SaveFreeMemory gives it back
+		Init( 32*1024*1024, 64, 0 );
+#else
 		Init( 32*1024*1024, 64, 2*1024*1024 + 192*1024 );
+#endif
 	}
 
 	int m_nSaveAllocs;
@@ -216,7 +223,13 @@ void SaveFreeMemory( void *pSaveMem )
 	--GetSaveMemory().m_nSaveAllocs;
 	if ( !GetSaveMemory().m_nSaveAllocs )
 	{
+#ifdef PLATFORM_VITA
+		// give back what a save committed (it held 3-6 MB through
+		// play): all of it (no initial commit), kernel memory is tight
+		GetSaveMemory().FreeAll( true );
+#else
 		GetSaveMemory().FreeAll( false );
+#endif
 	}
 }
 

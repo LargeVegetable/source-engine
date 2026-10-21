@@ -22,6 +22,35 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+#ifdef PLATFORM_VITA
+// Vita: the Combine APCs jitter and bounce in Water Hazard. Physics
+// steps once per 30 ms server tick (-tickrate 33); physics.cpp halves the
+// step while a wheeled vehicle is awake (it didn't stop the jitter; the APCs
+// are locked, vehicle_apc.cpp; the jeep drives fine). Every vehicle is listed from
+// construction, so ones restored from a save count; the airboat, ridden
+// through whole chapters, is left out by class
+static CUtlVector< CFourWheelVehiclePhysics * > s_VitaVehicles;
+
+static IPhysicsObject *VitaWheeledBody( CBaseAnimating *pOuter )
+{
+	if ( !pOuter || FClassnameIs( pOuter, "prop_vehicle_airboat" ) )
+		return NULL;
+	IPhysicsObject *pBody = pOuter->VPhysicsGetObject();
+	return ( pBody && pBody->IsMotionEnabled() && !pBody->IsAsleep() ) ? pBody : NULL;
+}
+
+bool CFourWheelVehiclePhysics::VitaWheeledVehicleAwake()
+{
+	for ( int i = 0; i < s_VitaVehicles.Count(); i++ )
+	{
+		if ( VitaWheeledBody( s_VitaVehicles[i]->m_pOuter ) )
+			return true;
+	}
+	return false;
+}
+
+#endif
+
 #define STICK_EXTENTS	400.0f
 
 
@@ -158,13 +187,20 @@ CFourWheelVehiclePhysics::CFourWheelVehiclePhysics( CBaseAnimating *pOuter )
 	m_pOuter = NULL;
 	m_pOuterServerVehicle = NULL;
 	m_flMaxSpeed = 30;
+#ifdef PLATFORM_VITA
+	s_VitaVehicles.AddToTail( this );
+#endif
 }
 
 //-----------------------------------------------------------------------------
 // Destructor
 //-----------------------------------------------------------------------------
+
 CFourWheelVehiclePhysics::~CFourWheelVehiclePhysics ()
 {
+#ifdef PLATFORM_VITA
+	s_VitaVehicles.FindAndRemove( this );
+#endif
 	physenv->DestroyVehicleController( m_pVehicle );
 }
 

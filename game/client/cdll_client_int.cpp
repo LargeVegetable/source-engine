@@ -171,6 +171,8 @@ extern vgui::IInputInternal *g_InputInternal;
 #include "sixense/in_sixense.h"
 #endif
 
+#include "vita_perf.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -2197,6 +2199,8 @@ void OnRenderStart()
 		// to help track down bad math.
 		FPExceptionEnabler enableExceptions;
 		VPROF_BUDGET( "ParticleMgr()->Simulate", VPROF_BUDGETGROUP_PARTICLE_SIMULATION );
+		VITA_SECTION_SCOPE( "cl particle sim" );
+		VITA_PERF_SCOPE( VITA_PERF_PARTICLE_SIM );
 		ParticleMgr()->Simulate( gpGlobals->frametime );
 	}
 

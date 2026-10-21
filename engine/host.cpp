@@ -57,6 +57,8 @@
 #include "host.h"
 #include "decal.h"
 #include "gl_matsysiface.h"
+#include "materialsystem/imaterialvar.h"
+#include "materialsystem/itexture.h"
 #include "gl_shader.h"
 #include "sys_dll.h"
 #include "cmodel_engine.h"
@@ -139,6 +141,13 @@ extern IXboxSystem *g_pXboxSystem;
 
 extern ConVar cl_cloud_settings;
 extern ConVar cl_logofile;
+
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+#include <malloc.h>
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/sysmem.h>
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -728,12 +737,29 @@ bool Host_IsSinglePlayerGame( void )
 	}
 }
 
+#ifdef PLATFORM_VITA
+// The Xbox 360's cache flushing on map changes, below, on the Vita too. Without
+// it the map tour ran out of memory loading the third map (d2_coast_03):
+// heap 145 MB at the start of the load, 212 MB a moment later and an OOM at
+// 219 of 224 MB. A new map's models, sounds and animations piled into the
+// data cache (64 MB budget) next to the previous map's until that budget,
+// not the heap, forced them out. The heap left decides the full flush
+// instead of the 360's physical memory figure. 128 MB: in game the heap is
+// 130-200 MB, so this is a full flush on practically every map change (the
+// second tour's town_02 -> coast_03 got a partial one at 98 MB free and
+// peaked at 201 MB)
+extern "C" int _newlib_heap_size_user;	// launcher_vita/main.cpp
+extern "C" void so_heap_check( const char *where );	// launcher (heap checks with -vitadebug)
+static ConVar vita_flush_free_mb( "vita_flush_free_mb", "128", FCVAR_NONE,
+	"Vita: on a map change, flush all cached data (models, sounds, animations) when less than this much heap (MB) is free; 0 = only Valve's listed maps" );
+#endif
+
 void CheckForFlushMemory( const char *pCurrentMapName, const char *pDestMapName )
 {
 	if ( host_flush_threshold.GetInt() == 0 )
 		return;
 
-#if defined(_X360)
+#if defined(_X360) || defined(PLATFORM_VITA)
 	// There are three cases in which we flush memory
 	//   Case 1: changing from one map to another
 	//          -> flush temp data caches
@@ -813,10 +839,23 @@ void CheckForFlushMemory( const char *pCurrentMapName, const char *pDestMapName 
 		DevMsg( "---BLACKLISTED!\n" );
 	}
 
+#ifdef PLATFORM_VITA
+	struct mallinfo mi = mallinfo();
+	const int nVitaFreeMB = ( _newlib_heap_size_user - (int)mi.uordblks ) >> 20;
+	const bool bVitaLowMemory = nVitaFreeMB < vita_flush_free_mb.GetInt();
+	if ( bIsMapChanging || bVitaLowMemory )
+		Msg( "[vita] map change %s -> %s: %s flush (heap %u MB in use, %d MB free)\n", pCurrentMapName, pDestMapName,
+			( bVitaLowMemory || ( bIsDestMapBlacklisted && bIsMapChanging ) ) ? "full" : "partial",
+			(unsigned)( mi.uordblks >> 20 ), nVitaFreeMB );
+	if ( CommandLine()->CheckParm( "-vitadebug" ) )
+		so_heap_check( "map change, before the flush" );
+	if ( bVitaLowMemory || ( bIsDestMapBlacklisted && bIsMapChanging ) )
+#else
 	MEMORYSTATUS stat;
 	GlobalMemoryStatus( &stat );
 	if ( ( stat.dwAvailPhys < host_flush_threshold.GetInt() * 1024 * 1024 ) ||
 		 ( bIsDestMapBlacklisted && bIsMapChanging ) )
+#endif
 	{
 		// Flush everything; ALL data is reloaded from scratch
 		SV_FlushMemoryOnNextServer();
@@ -831,6 +870,10 @@ void CheckForFlushMemory( const char *pCurrentMapName, const char *pDestMapName 
 		DevWarning( "---PARTIAL FLUSH\n" );
 	}
 	DevMsg( "---- --- ----\n" );
+#ifdef PLATFORM_VITA
+	if ( CommandLine()->CheckParm( "-vitadebug" ) )
+		so_heap_check( "map change, after the flush" );
+#endif
 #endif
 }
 
@@ -1586,6 +1629,163 @@ void Host_ReadConfiguration_360( void )
 // Purpose: 
 // Input  : false - 
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+extern "C" void so_exit_process( int code );	// launcher: Host_Shutdown quits without the hanging teardown
+extern "C" void so_profile_enable( int enable );
+static void VitaProfileChanged( IConVar *pVar, const char *pOldValue, float flOldValue )
+{
+	so_profile_enable( ((ConVar *)pVar)->GetInt() != 0 );
+}
+ConVar vita_profile( "vita_profile", "0", FCVAR_NONE, "Vita: detailed section timers (the [vita] server and engine/client ms/s log lines); off by default, they cost CPU: turn on for a measurement run", VitaProfileChanged );
+
+//-----------------------------------------------------------------------------
+// Map tour: loads each map in vita_maptour_maps and stays vita_maptour_seconds
+// once it's in game, so memory, shader slots and frame rate on late maps show
+// up in the log without playing there ("vita_maptour" from vita_user.cfg or
+// the console; vita_maptour_autostart runs it once on its own)
+//-----------------------------------------------------------------------------
+static ConVar vita_maptour_maps( "vita_maptour_maps",
+	"d1_eli_01 d1_town_02 d2_coast_03 d2_coast_10 d2_prison_02 d2_prison_06 d3_c17_07 d3_c17_12 d3_citadel_03 d3_breen_01",
+	FCVAR_NONE, "Vita: maps vita_maptour visits" );
+static ConVar vita_maptour_seconds( "vita_maptour_seconds", "30", FCVAR_NONE, "Vita: seconds vita_maptour stays in each map" );
+// vitaGL's shader objects are never freed, so their count only grows
+// from map to map (983 of 4096 after a few canal maps); one unattended tour
+// through the later chapters shows whether a whole playthrough stays under
+// the limit: 1,152 after all ten. Five tours also sized the heap (data cache,
+// flushes, large-block arena) until all ten maps loaded. With autostart 1 it
+// runs once, at the first launch without cfg/vita_maptour_done6.txt. Tour 6:
+// the exit-lock fix commits CMemoryStack memory in whole megabytes,
+// ~8-10 MB more kernel memory; kernel free bottomed at 23 MB on tour 5
+static ConVar vita_maptour_autostart( "vita_maptour_autostart", "0", FCVAR_NONE, "Vita: run vita_maptour once, at the first launch without hl2/cfg/vita_maptour_done6.txt (a test tool; 0 = off)" );
+static int s_nVitaMapTour = -1;			// index of the map being visited, -1 = off
+static double s_flVitaMapTourInGame = 0;	// when the current map was first in game
+
+// vitaGL (through the launcher): live GL programs and shaders
+extern "C" void vglGetProgramShaderCounts( int *programs, int *shaders );
+
+static void VitaMapTourReport( const char *pszWhen )
+{
+	int nPrograms = 0, nShaders = 0;
+	vglGetProgramShaderCounts( &nPrograms, &nShaders );
+	struct mallinfo mi = mallinfo();
+	SceKernelFreeMemorySizeInfo info;
+	info.size = sizeof( info );
+	sceKernelGetFreeMemorySize( &info );
+	DataCacheStatus_t cacheStatus;
+	DataCacheLimits_t cacheLimits;
+	g_pDataCache->GetStatus( &cacheStatus, &cacheLimits );
+	extern int Hunk_Size();
+	Msg( "[vita] maptour: %s %s: shaders %d/4096, GL programs %d/1024, heap %u MB in use (data cache %u of %u MB), hunk %d MB, kernel free %d MB\n",
+		pszWhen, sv.GetMapName(), nShaders, nPrograms, (unsigned)( mi.uordblks >> 20 ),
+		cacheStatus.nBytes >> 20, cacheLimits.nMaxBytes >> 20, Hunk_Size() >> 20, info.size_user >> 20 );
+}
+
+static bool VitaMapTourLoad( int nIndex )
+{
+	CUtlStringList maps;
+	V_SplitString( vita_maptour_maps.GetString(), " ", maps );
+	if ( nIndex >= maps.Count() )
+	{
+		Msg( "[vita] maptour: done (%d maps); load a save from the menu to keep playing\n", maps.Count() );
+		return false;
+	}
+	Msg( "[vita] maptour: loading %s (%d of %d)\n", maps[nIndex], nIndex + 1, maps.Count() );
+	Cbuf_AddText( va( "map %s\n", maps[nIndex] ) );
+	s_nVitaMapTour = nIndex;
+	s_flVitaMapTourInGame = 0;
+	return true;
+}
+
+extern "C" void so_request_screenshot( void );
+CON_COMMAND( vita_screenshot, "Vita: save the next frame to ux0:data/hl2_shot_NN.tga and log the world material under the crosshair" )
+{
+	so_request_screenshot();
+
+	// The world material under the crosshair (brushes only: R_LightVec), so a
+	// screenshot of a glitch comes with what was drawn there
+	static int s_nShot = 0;
+	s_nShot++;
+
+	IMaterial *pMaterial = GetMaterialAtCrossHair();
+	if ( !pMaterial )
+	{
+		Msg( "[vita] shot %d: no world material under the crosshair\n", s_nShot );
+		return;
+	}
+	char szBase[160] = "-";
+	bool bFound = false;
+	IMaterialVar *pBase = pMaterial->FindVar( "$basetexture", &bFound, false );
+	if ( bFound && pBase && pBase->IsTexture() && pBase->GetTextureValue() )
+	{
+		ITexture *pTex = pBase->GetTextureValue();
+		Q_snprintf( szBase, sizeof( szBase ), "%s %dx%d fmt %d", pTex->GetName(), pTex->GetActualWidth(), pTex->GetActualHeight(), (int)pTex->GetImageFormat() );
+	}
+	IMaterialVar *pAlphaTest = pMaterial->FindVar( "$alphatest", &bFound, false );
+	int nAlphaTestParam = ( bFound && pAlphaTest ) ? pAlphaTest->GetIntValue() : -1;
+	IMaterialVar *pTranslucent = pMaterial->FindVar( "$translucent", &bFound, false );
+	int nTranslucentParam = ( bFound && pTranslucent ) ? pTranslucent->GetIntValue() : -1;
+	Msg( "[vita] shot %d: crosshair material %s, shader %s, translucent %d, alphatested %d ($alphatest %d, $translucent %d), base %s\n",
+		s_nShot, pMaterial->GetName(), pMaterial->GetShaderName(), pMaterial->IsTranslucent(), pMaterial->IsAlphaTested(),
+		nAlphaTestParam, nTranslucentParam, szBase );
+}
+
+// The port's controller layout (SDL names the Vita's face buttons like a
+// 360 pad: cross A, circle B, square X, triangle Y): R fire, L alt fire
+// (the Vita has no triggers, where the 360 layout puts them), cross jump,
+// square use, triangle flashlight, circle reload, rear touchpad left half
+// crouch (STICK1, see inputsystem/joystick_sdl.cpp). Run at startup and
+// after the client executes 360controller.cfg (once, at the first map load
+// while joy_xcontroller_cfg_loaded < 2), which had put jump and use on L/R.
+// Circle was the debug screenshot (vita_screenshot) in early builds
+#define VITA_DEFAULT_BINDS "bind R_SHOULDER +attack; bind L_SHOULDER +attack2; bind A_BUTTON +jump; bind X_BUTTON +use; " \
+	"bind Y_BUTTON \"impulse 100\"; bind B_BUTTON +reload; bind STICK1 +duck\n"
+CON_COMMAND( vita_binds, "Vita: the port's controller binds (R fire, L alt fire, cross jump, square use, triangle flashlight, circle reload, rear-left touch crouch), then the layout saved from the options menu" )
+{
+	// Inserted, not appended, so they run before whatever the buffer holds
+	// next (vita_user.cfg at launch). Then the layout saved from the
+	// options menu's Controls tab (GameUI VitaMenu.cpp), if there is one
+	if ( g_pFileSystem->FileExists( "cfg/vita_controls.cfg", "MOD" ) )
+		Cbuf_InsertText( VITA_DEFAULT_BINDS "exec vita_controls.cfg\nvita_binds_fixup\n" );
+	else
+		Cbuf_InsertText( VITA_DEFAULT_BINDS );
+}
+
+// A layout saved by an early build has circle on the debug screenshot
+CON_COMMAND( vita_binds_fixup, "Vita: moves circle off the old debug screenshot bind (run by vita_binds)" )
+{
+	const char *pszCircle = Key_BindingForKey( KEY_XBUTTON_B );
+	if ( pszCircle && !V_stricmp( pszCircle, "vita_screenshot" ) )
+		Cbuf_InsertText( "bind B_BUTTON +reload\n" );
+}
+
+CON_COMMAND( vita_maptour, "Vita: visit each map in vita_maptour_maps for vita_maptour_seconds (memory/fps check)" )
+{
+	if ( !VitaMapTourLoad( 0 ) )
+		s_nVitaMapTour = -1;
+}
+
+static void VitaMapTourFrame()
+{
+	if ( s_nVitaMapTour < 0 )
+		return;
+	if ( !sv.IsActive() || !cl.IsActive() || scr_drawloading )
+		return;
+	double flNow = Plat_FloatTime();
+	if ( s_flVitaMapTourInGame == 0 )
+	{
+		s_flVitaMapTourInGame = flNow;
+		VitaMapTourReport( "in game in" );
+		return;
+	}
+	if ( flNow - s_flVitaMapTourInGame >= vita_maptour_seconds.GetFloat() )
+	{
+		VitaMapTourReport( "leaving" );
+		if ( !VitaMapTourLoad( s_nVitaMapTour + 1 ) )
+			s_nVitaMapTour = -1;
+	}
+}
+#endif
+
 void Host_ReadConfiguration()
 {
 	if ( sv.IsDedicated() )
@@ -1638,6 +1838,84 @@ void Host_ReadConfiguration()
 	}
 
 	Cbuf_Execute();
+
+#ifdef PLATFORM_VITA
+	// Low-cost settings, applied over whatever config.cfg holds: no
+	// shadows or per-model world lights (dynamic lights stay on: the
+	// flashlight is one, r_newflashlight 0; models use the
+	// ambient cube; r_worldlights 1 cost more than it looked), no water
+	// reflections, 3D skybox, detail
+	// props, decals, flecks, brass, splashes, bloom, tonemapping or motion
+	// blur; facial animation only within r_vita_flex_dist (l_studio.cpp);
+	// models skip their top LOD (r_rootlod 1) and pick LODs by distance
+	// (r_lod -1; 2 forces the old low detail); cheaper sound (no room
+	// DSP, low-quality resampling) and fewer ragdolls and gibs. Textures are
+	// at 1/8 size per axis (mat_picmip 3; 2 and 4 work from vita_user.cfg),
+	// trilinear filtered, and the world is lightmapped (mat_fullbright 1 turns lighting off); bump,
+	// specular and the rest are forced off in CMaterialSystem::OverrideConfig.
+	Cbuf_AddText(
+		"r_shadows 0; r_shadowrendertotexture 0; r_shadowmaxrendered 0; r_flashlightdepthtexture 0;"
+		"r_dynamic 1; r_worldlights 0; r_ambientboost 0; r_lightaverage 0;"
+		"r_waterforceexpensive 0; r_waterforcereflectentities 0; r_WaterDrawReflection 0; r_WaterDrawRefraction 0;"
+		"r_3dsky 0; r_DrawDetailProps 0; cl_detaildist 0; cl_detailfade 0;"
+		"r_decals 0; mp_decals 0; r_drawmodeldecals 0; r_decalstaticprops 0;"
+		"r_drawflecks 0; cl_ejectbrass 0; cl_show_splashes 0;"
+		"mat_disable_bloom 1; mat_motion_blur_enabled 0; mat_colorcorrection 0; mat_hdr_level 0;"
+		"r_teeth 1; r_flex 1; flex_smooth 1; r_rootlod 1; r_lod -1;"
+		"dsp_slow_cpu 1; snd_pitchquality 0; snd_spatialize_roundrobin 1;"
+		"g_ragdoll_maxcount 2; props_break_max_pieces 4;"
+		// ropes and cables are client-side visuals: no per-frame world traces
+		// for every segment, fewer segments, no antialiasing strips, wind
+		// only close by
+		"rope_collide 0; rope_subdiv 1; rope_smooth 0; rope_wind_dist 300;"
+		// the Xbox 360's AI tuning: NPCs default to efficient thinking, and
+		// route simplification, direct-route probes and plane solving run
+		// less often (entity thinking is most of the server's frame)
+		"ai_default_efficient 1; ai_strong_optimizations 1;"
+		"mat_picmip 3; mat_forceaniso 0; mat_trilinear 1; mat_antialias 0; mat_bumpmap 0; mat_parallaxmap 0; mat_reducefillrate 1\n" );
+	// The Xbox 360's threading set (also three cores): bone setup, leaf
+	// system, renderables and particles split across the job pool's two
+	// workers. host_thread_mode 1 runs the server frame as a job alongside
+	// the client's (see CBasePlayer::IsUserCmdDataValid for the left-stick
+	// fix it needed); snd_mix_async only works on consoles.
+	Cbuf_AddText(
+		"cl_threaded_bone_setup 1; cl_threaded_client_leaf_system 1; r_threaded_renderables 1;"
+		"r_threaded_particles 1; host_thread_mode 1\n" );
+	// Entities think on even ticks only at the default 66 Hz (the Xbox 360
+	// setting; the maps carry alternateticksfix keys for it). The launcher
+	// passes -tickrate 33, where every tick is already a think tick.
+	if ( CommandLine()->ParmValue( "-tickrate", 66 ) > 40 )
+		Cbuf_AddText( "sv_alternateticks 1\n" );
+	else
+		Cbuf_AddText( "sv_alternateticks 0\n" );
+	// Vita controls (vita_binds, also re-run after the client's one-time
+	// 360controller.cfg); vita_user.cfg can rebind
+	Cbuf_AddText( "vita_binds\n" );
+	// Settings changed in the options menu (GameUI VitaMenu.cpp), over the
+	// built-in ones above
+	if ( g_pFileSystem->FileExists( "cfg/vita_settings.cfg", "MOD" ) )
+		Cbuf_AddText( "exec vita_settings.cfg\n" );
+	// Optional overrides from the memory card (ux0:data/halflife2/hl2/cfg),
+	// so settings can be tried on the device without a rebuild
+	Cbuf_AddText( "exec vita_user.cfg\n" );
+	Cbuf_Execute();
+	// the marker's name changes when a tour should run again (3:
+	// 40 MB data cache and a full flush on every map change; tours 1 and 2
+	// ran out of memory loading the coast maps; 6: whole-megabyte commits)
+	if ( vita_maptour_autostart.GetBool() && !g_pFileSystem->FileExists( "cfg/vita_maptour_done6.txt", "MOD" ) )
+	{
+		// marked before it starts, so a crash during the tour doesn't repeat it
+		FileHandle_t hDone = g_pFileSystem->Open( "cfg/vita_maptour_done6.txt", "w", "MOD" );
+		if ( hDone )
+		{
+			const char szDone[] = "The automatic map tour has run. Delete this file to run it again.\n";
+			g_pFileSystem->Write( szDone, sizeof( szDone ) - 1, hDone );
+			g_pFileSystem->Close( hDone );
+		}
+		Msg( "[vita] maptour: starting the one automatic tour (%s, %d s each)\n", vita_maptour_maps.GetString(), vita_maptour_seconds.GetInt() );
+		Cbuf_AddText( "vita_maptour\n" );
+	}
+#endif
 
 	if ( pRemoteStorage )
 	{
@@ -2623,6 +2901,7 @@ Runs all active servers
 
 void _Host_RunFrame_Input( float accumulated_extra_samples, bool bFinalTick )
 {
+	VITA_PERF_SCOPE( VITA_PERF_HOST_INPUT );
 	VPROF_BUDGET( "_Host_RunFrame_Input", _T("Input") );
 
 	// Run a test script?
@@ -2663,6 +2942,7 @@ void _Host_RunFrame_Input( float accumulated_extra_samples, bool bFinalTick )
 
 void _Host_RunFrame_Server( bool finaltick )
 {
+	VITA_PERF_SCOPE( VITA_PERF_HOST_SERVER );
 	VPROF_BUDGET( "_Host_RunFrame_Server", VPROF_BUDGETGROUP_GAME );
 	VPROF_INCREMENT_COUNTER( "ticks", 1 );
 	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
@@ -2692,6 +2972,7 @@ void _Host_RunFrame_Server_Async( int numticks )
 
 void _Host_RunFrame_Client( bool framefinished )
 {
+	VITA_PERF_SCOPE( VITA_PERF_HOST_CLIENT );
 #ifndef SWDS
 	VPROF( "_Host_RunFrame_Client" );
 	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s %d", __FUNCTION__, framefinished );
@@ -2759,8 +3040,24 @@ void CheckSpecialCheatVars()
 }
 
 
+#ifdef PLATFORM_VITA
+extern "C" void so_set_menus_visible( int bVisible );	// launcher
+#endif
+
 void _Host_RunFrame_Render()
 {
+	VITA_PERF_SCOPE( VITA_PERF_HOST_RENDER );
+#ifdef PLATFORM_VITA
+	// menus keep the per-frame dynamic buffer discard; in game the buffers
+	// append across frames (shaderapidx9 meshdx8.cpp, vita_mesh_frame_discard 2)
+	so_set_menus_visible( !cl.IsActive() || scr_drawloading || EngineVGui()->IsGameUIVisible() );
+	// when a map has finished loading
+	static bool s_bVitaWasLoading = false;
+	const bool bVitaLoading = !cl.IsActive() || scr_drawloading;
+	if ( s_bVitaWasLoading && !bVitaLoading && CommandLine()->CheckParm( "-vitadebug" ) )
+		Cbuf_AddText( "vita_texture_report\n" );	// texture memory now and at sharper settings
+	s_bVitaWasLoading = bVitaLoading;
+#endif
 #ifndef SWDS
 	VPROF( "_Host_RunFrame_Render" );
 	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "_Host_RunFrame_Render" );
@@ -2908,6 +3205,7 @@ void CL_ApplyAddAngle()
 
 void _Host_RunFrame_Sound()
 {
+	VITA_PERF_SCOPE( VITA_PERF_HOST_SOUND );
 #ifndef SWDS
 
 	VPROF_BUDGET( "_Host_RunFrame_Sound", VPROF_BUDGETGROUP_OTHER_SOUND );
@@ -3047,6 +3345,29 @@ void Host_SetClientInSimulation( bool bInSimulation )
 static ConVar host_Sleep( "host_sleep", "0", FCVAR_CHEAT, "Force the host to sleep a certain number of milliseconds each frame." );
 extern ConVar sv_alternateticks;
 #define LOG_FRAME_OUTPUT 0
+
+#ifdef PLATFORM_VITA
+static ConVar vita_server_worker( "vita_server_worker", "1", FCVAR_NONE, "Vita: threaded server job on worker 0 (core 1) (1) or the shared job queue (0)" );
+
+// The engine thread was the one unpinned thread: it moved between cores ~100
+// times a second, and all threads share one priority, so landing on core 1 or
+// 2 held off the server worker or the render thread (no time slicing) until
+// it blocked. Measured: pinned frames idled ~22 ms against ~30
+// unpinned, and the server job started 2 ms after queuing instead of 3-7
+static ConVar vita_engine_core( "vita_engine_core", "0", FCVAR_NONE, "Vita: core the engine thread is pinned to (0-2), -1 = any core" );
+
+static void VitaEngineCoreFrame()
+{
+	static int s_nApplied = -2;
+	int nCore = vita_engine_core.GetInt();
+	if ( nCore != s_nApplied )
+	{
+		s_nApplied = nCore;
+		int nMask = ( nCore >= 0 && nCore <= 2 ) ? ( SCE_KERNEL_CPU_MASK_USER_0 << nCore ) : SCE_KERNEL_CPU_MASK_USER_ALL;
+		sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), nMask );
+	}
+}
+#endif
 
 void _Host_RunFrame (float time)
 {
@@ -3466,6 +3787,13 @@ void _Host_RunFrame (float time)
 			{
 				pGameJob->SetServiceThread( g_nServerThread );
 			}
+#ifdef PLATFORM_VITA
+			// Worker 0 (core 1) takes the server job directly: one of the two
+			// workers shares core 2 with the queued render thread
+			// (vita_server_worker 0 = shared job queue)
+			if ( vita_server_worker.GetBool() )
+				pGameJob->SetServiceThread( 0 );
+#endif
 			g_pThreadPool->AddJob( pGameJob );
 #if LOG_FRAME_OUTPUT
 			if ( !cl.IsPaused() || !sv.IsPaused() )
@@ -3537,6 +3865,7 @@ void _Host_RunFrame (float time)
 		{
 			{
 				VPROF_BUDGET( "WaitForAsyncServer", "AsyncServer" );
+				VITA_PERF_SCOPE( VITA_PERF_HOST_SERVER_JOIN );
 				if ( Host_IsSinglePlayerGame() )
 				{
 					// This should change to a YieldWait if the server starts wanting to parallel process. If
@@ -3596,9 +3925,15 @@ Host_Frame
 */
 void Host_RunFrame( float time )
 {
+	VITA_PERF_SCOPE( VITA_PERF_HOST_FRAME );
 	static  double	timetotal = 0;
 	static  int		timecount = 0;
 	static	double  timestart = 0;
+
+#ifdef PLATFORM_VITA
+	VitaMapTourFrame();
+	VitaEngineCoreFrame();
+#endif
 
 #ifndef SWDS
 	if ( !scr_drawloading && sv.IsActive() && cl.IsActive() && !sv.m_bLoadgame)
@@ -3904,7 +4239,7 @@ void Host_PostInit()
 		EngineVGui()->PostInit();
 	}
 
-#if defined( LINUX ) && !defined ANDROID
+#if defined( LINUX ) && !defined ANDROID && !defined PLATFORM_VITA
 	const char en_US[] = "en_US.UTF-8";
 	const char *CurrentLocale = setlocale( LC_ALL, NULL );
 	if ( !CurrentLocale )
@@ -4110,6 +4445,10 @@ void Host_Init( bool bDedicated )
 	}
 	if ( g_pThreadPool )
 		g_pThreadPool->Start( startParams, "CmpJob" );
+#ifdef PLATFORM_VITA
+	if ( g_pThreadPool )
+		Msg( "[vita] job pool: %d worker threads, %d cores\n", g_pThreadPool->NumThreads(), GetCPUInformation()->m_nLogicalProcessors );
+#endif
 
 	// From const.h, the loaded game .dll will give us the correct value which is transmitted to the client
 	host_state.interval_per_tick = DEFAULT_TICK_INTERVAL;
@@ -4884,6 +5223,16 @@ void Host_Shutdown(void)
 
 	// Disconnect from server
 	Host_Disconnect(true);
+
+#ifdef PLATFORM_VITA
+	// Quitting left a black screen: the teardown after this point (thread
+	// pool stop, module shutdowns, SDL/vitaGL video) hangs somewhere. The
+	// config is written and the server is down (saves are written when made),
+	// so leave now; the OS reclaims memory, threads and the GPU, as most Vita
+	// ports do. Back to LiveArea.
+	Msg( "[vita] quit: config written, server shut down; exiting the process\n" );
+	so_exit_process( 0 );
+#endif
 
 #ifndef SWDS
 	// keep ConMsg from trying to update the screen

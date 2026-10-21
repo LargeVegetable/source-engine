@@ -43,7 +43,7 @@
 #include "tier1.h"
 #include "tier2/tier2.h"
 
-#if defined(_LINUX) && !defined(__ANDROID__)
+#if defined(_LINUX) && !defined(__ANDROID__) && !defined(PLATFORM_VITA)
 #include <GL/glx.h>
 #endif
 

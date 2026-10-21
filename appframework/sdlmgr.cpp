@@ -19,7 +19,7 @@
 
 #include "tier1/utllinkedlist.h"
 #include "tier1/convar.h"
-#ifdef TOGLES
+#if defined( TOGLES ) && !defined( PLATFORM_VITA )
 #include <EGL/egl.h>
 #endif
 
@@ -65,16 +65,19 @@ static void *l_egl = NULL;
 static void *l_gles = NULL;
 
 typedef void *(*t_glGetProcAddress)( const char * );
+t_glGetProcAddress _glGetProcAddress;
+
+#ifndef PLATFORM_VITA
 typedef EGLBoolean (*t_eglBindAPI)(EGLenum api);
 typedef EGLBoolean (*t_eglInitialize)(EGLDisplay display, EGLint *major, EGLint *minor);
 typedef EGLDisplay (*t_eglGetDisplay)(NativeDisplayType native_display);
 typedef char const *(*t_eglQueryString)(EGLDisplay display, EGLint name);
 
 t_eglBindAPI _eglBindAPI;
-t_glGetProcAddress _glGetProcAddress;
 t_eglInitialize _eglInitialize;
 t_eglGetDisplay _eglGetDisplay;
 t_eglQueryString _eglQueryString;
+#endif
 #endif
 
 /*
@@ -188,6 +191,10 @@ void	CheckGLError( int line )
 //-----------------------------------------------------------------------------
 #if !defined( DEDICATED )
 
+#ifdef PLATFORM_VITA
+void *VitaGLShimLookup( const char *name ); // vita_glshims.cpp
+#endif
+
 void *VoidFnPtrLookup_GlMgr(const char *fn, bool &okay, const bool bRequired, void *fallback)
 {
 	void *retval = NULL;
@@ -201,8 +208,14 @@ void *VoidFnPtrLookup_GlMgr(const char *fn, bool &okay, const bool bRequired, vo
 
 
 #if defined ANDROID || defined TOGLES
+#ifdef PLATFORM_VITA
+	// stand-ins for what vitaGL lacks come first
+	retval = VitaGLShimLookup( fn );
+	if( !retval && _glGetProcAddress )
+#else
 	// SDL does the right thing, so we never need to use tier0 in this case.
 	if( _glGetProcAddress )
+#endif
 	{
 		retval = _glGetProcAddress(fn);
 
@@ -601,7 +614,14 @@ InitReturnVal_t CSDLMgr::Init()
 	*(attCursor++) = (int) (value);
 
 
-#ifdef TOGLES
+#if defined( TOGLES ) && defined( PLATFORM_VITA )
+	// no EGL; SDL2-vitaGL resolves GL entry points through vitaGL
+	_glGetProcAddress = (t_glGetProcAddress)SDL_GL_GetProcAddress;
+
+	SET_GL_ATTR(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+	SET_GL_ATTR(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SET_GL_ATTR(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#elif defined( TOGLES )
 	l_egl = dlopen("libEGL.so", RTLD_LAZY);
 	l_gles = dlopen("libGLESv3.so", RTLD_LAZY);
 
@@ -676,7 +696,13 @@ InitReturnVal_t CSDLMgr::Init()
 	//  GL entry points, but the game hasn't made a window yet. So it's time
 	//  to make a window! We make a 640x480 one here, and later, when asked
 	//  to really actually make a window, we just resize the one we built here.
+#ifdef PLATFORM_VITA
+	// the launcher passes the render size as -w/-h; vitaGL's display buffers
+	// use the same size (the display hardware scales it to the screen)
+	if ( !CreateHiddenGameWindow( "", CommandLine()->ParmValue( "-w", 960 ), CommandLine()->ParmValue( "-h", 544 ) ) )
+#else
 	if ( !CreateHiddenGameWindow( "", 1280, 720 ) )
+#endif
 		Error( "CreateGameWindow failed" );
 
 	SDL_HideWindow( m_Window );
@@ -1183,6 +1209,10 @@ void CSDLMgr::OnFrameRendered()
 }
 
 #if defined( DX_TO_GL_ABSTRACTION )
+#ifdef PLATFORM_VITA
+extern "C" void vglSwapBuffers( unsigned char has_commondialog );	// vitaGL (launcher wraps it: memory log, screenshots)
+#endif
+
 void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 {
 	SDLAPP_FUNC;
@@ -1433,7 +1463,17 @@ void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 	CFastTimer tm;
 	tm.Start();
 
+#ifdef PLATFORM_VITA
+	// SDL only swaps for the thread that made the window current (its
+	// current window is per thread), and ToGL skips SDL_GL_MakeCurrent on the
+	// Vita (it finishes the GPU and clears the screen): with the queued
+	// material system presenting from the render thread, SDL_GL_SwapWindow
+	// silently did nothing and the screen froze. SDL's Vita swap is just this
+	// call (plus an IME update the game doesn't use)
+	vglSwapBuffers( 1 );
+#else
 	SDL_GL_SwapWindow( m_Window );
+#endif
 
 	m_flPrevGLSwapWindowTime = tm.GetDurationInProgress().GetMillisecondsF();
 
@@ -2134,7 +2174,13 @@ void CSDLMgr::DisplayedSize( uint &width, uint &height )
 	SDLAPP_FUNC;
 
 	int w, h;
+#ifdef PLATFORM_VITA
+	// vitaGL's display buffer size, whatever size SDL keeps for its window
+	w = CommandLine()->ParmValue( "-w", 960 );
+	h = CommandLine()->ParmValue( "-h", 544 );
+#else
 	SDL_GetWindowSize(m_Window, &w, &h);
+#endif
 	width = (uint) w;
 	height = (uint) h;
 }

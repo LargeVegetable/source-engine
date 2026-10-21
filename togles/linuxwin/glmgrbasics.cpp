@@ -2628,7 +2628,9 @@ bool	GLMDetectOGLP( void )
 #include <sys/types.h>  
 #ifndef _WIN32
 	#include <unistd.h>  
-#ifdef LINUX
+#if defined( PLATFORM_VITA )
+// no sysctl; GLMDetectGDB uses Sys_IsDebuggerPresent
+#elif defined( LINUX )
 #include <linux/sysctl.h>
 #else
 #include <sys/sysctl.h>

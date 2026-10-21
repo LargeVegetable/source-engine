@@ -15,6 +15,11 @@
 #include "tier0/dbg.h"
 #include "tier0/minidump.h"
 
+#ifdef PLATFORM_VITA
+// launcher_vita/so_loader.cpp
+extern "C" void so_log_backtrace( const char *tag );
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -43,6 +48,12 @@ void MemAllocOOMError( size_t nSize )
 		s_oomerror_called = true;
 
 		MinidumpUserStreamInfoAppend( "MemAllocOOMError: %u bytes\n", (uint)nSize );
+#ifdef PLATFORM_VITA
+		struct mallinfo mi = mallinfo();
+		Msg( "MemAllocOOMError: %u bytes requested; heap: %u bytes in use, %u free\n",
+			(uint)nSize, (uint)mi.uordblks, (uint)mi.fordblks );
+		so_log_backtrace( "MemAllocOOMError" );
+#endif
 
 		//$ TODO: Need a good error message here.
 		// A basic advice to try lowering texture settings is just most-likely to help users who are exhausting address

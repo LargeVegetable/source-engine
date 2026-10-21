@@ -29,6 +29,11 @@
 #include "sys_dll.h"
 #include "vphysics/virtualmesh.h"
 
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+extern "C" void so_perf_count( int counter, uint64_t amount );	// launcher_vita/so_loader.cpp
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1660,6 +1665,9 @@ CON_COMMAND_EXTERN( ray_bench, RayBench, "Time the rays" )
 //-----------------------------------------------------------------------------
 void CEngineTrace::TraceRay( const Ray_t &ray, unsigned int fMask, ITraceFilter *pTraceFilter, trace_t *pTrace )
 {	
+#ifdef PLATFORM_VITA
+	so_perf_count( VITA_PERF_TRACE, 0 );
+#endif
 #if defined _DEBUG && !defined SWDS
 	if( debugrayenable.GetBool() )
 	{

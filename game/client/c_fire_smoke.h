@@ -126,6 +126,9 @@ public:
 
 	void	StartClientOnly( void );
 	void	RemoveClientOnly( void );
+#ifdef PLATFORM_VITA
+	void	VitaRestartEffect( void );	// vita_fire_smoke changed
+#endif
 
 protected:
 	void	Update( void );

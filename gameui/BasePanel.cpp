@@ -93,6 +93,10 @@ using namespace vgui;
 
 #undef MessageBox	// Windows helpfully #define's this to MessageBoxA, we're using vgui::MessageBox
 
+#ifdef PLATFORM_VITA
+#include "VitaMenu.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -166,6 +170,12 @@ void CGameMenuItem::ApplySchemeSettings(IScheme *pScheme)
 	SetReleasedSound("UI/buttonclickrelease.wav");
 	SetButtonActivationType(Button::ACTIVATE_ONPRESSED);
 
+#ifdef PLATFORM_VITA
+	// the console look (VitaMenu.cpp): larger type and a highlight bar
+	SetFont( VitaMenu_ItemFont() );
+	SetArmedColor( Color( 255, 255, 255, 255 ), Color( 255, 255, 255, 34 ) );
+	SetTextInset( MAIN_MENU_INDENT_X360, 0 );
+#endif
 	if ( GameUI().IsConsoleUI() )
 	{
 		SetArmedColor(GetSchemeColor("MainMenu.ArmedTextColor", pScheme), GetSchemeColor("Button.ArmedBgColor", pScheme));
@@ -180,6 +190,20 @@ void CGameMenuItem::ApplySchemeSettings(IScheme *pScheme)
 
 void CGameMenuItem::PaintBackground()
 {
+#ifdef PLATFORM_VITA
+	// a highlight bar with an orange edge on the selected item, as on the
+	// Vita's other screens
+	if ( IsArmed() && IsVisible() && GetParent()->GetAlpha() >= 32 )
+	{
+		int wide, tall;
+		GetSize( wide, tall );
+		surface()->DrawSetColor( 255, 255, 255, 34 );
+		surface()->DrawFilledRect( 0, 0, wide, tall );
+		surface()->DrawSetColor( 255, 176, 0, 255 );
+		surface()->DrawFilledRect( 0, 0, 3, tall );
+	}
+	return;
+#endif
 	if ( !GameUI().IsConsoleUI() )
 	{
 		BaseClass::PaintBackground();
@@ -331,6 +355,14 @@ public:
 		{
 			m_pConsoleFooter = NULL;
 		}
+#ifdef PLATFORM_VITA
+		// room for the highlight bar (the PC menu sizes to its text)
+		{
+			int wide, tall;
+			surface()->GetScreenSize( wide, tall );
+			SetFixedWidth( wide * 36 / 100 );
+		}
+#endif
 
 		m_hMainMenuOverridePanel = NULL;
 	}
@@ -342,6 +374,9 @@ public:
 		int height = atoi(pScheme->GetResourceString("MainMenu.MenuItemHeight"));
 		if( IsProportional() )
 			height = scheme()->GetProportionalScaledValue( height );
+#ifdef PLATFORM_VITA
+		height = surface()->GetFontTall( VitaMenu_ItemFont() ) * 3 / 2;
+#endif
 
 		// make fully transparent
 		SetMenuItemHeight(height);
@@ -499,6 +534,15 @@ public:
 		}
 
 		m_KeyRepeat.KeyDown( code );
+
+#ifdef PLATFORM_VITA
+		// circle goes back to the game, as on the consoles
+		if ( code == KEY_XBUTTON_B && GameUI().IsInLevel() )
+		{
+			GetParent()->OnCommand( "ResumeGame" );
+			return;
+		}
+#endif
 
 		int nDir = 0;
 
@@ -1600,12 +1644,15 @@ CGameMenu *CBasePanel::RecursiveLoadGameMenu(KeyValues *datafile)
 {
 	CGameMenu *menu = new CGameMenu(this, datafile->GetName());
 
+#ifndef PLATFORM_VITA
+	// (the Vita has no keyboard for the console)
 	wchar_t *pString = g_pVGuiLocalize->Find( "#GameUI_Console" );
 
 	if( pString )
 		menu->AddMenuItem("Console", V_wcsupr(pString), "OpenConsole", this);
 	else
 		menu->AddMenuItem("Console", "CONSOLE", "OpenConsole", this);
+#endif
 
 	bool bFoundServerBrowser = false;
 
@@ -1632,6 +1679,11 @@ CGameMenu *CBasePanel::RecursiveLoadGameMenu(KeyValues *datafile)
 		if ( cmd && (!Q_stricmp( cmd, "OpenFriendsDialog" )
 			|| !Q_stricmp( cmd, "engine bug" )) )
 			continue;
+#ifdef PLATFORM_VITA
+		// achievements need Steam
+		if ( cmd && !Q_stricmp( cmd, "OpenAchievementsDialog" ) )
+			continue;
+#endif
 
 		menu->AddMenuItem(name, label, cmd, this, dat);
 	}
@@ -2033,6 +2085,34 @@ void CBasePanel::OnGameUIActivated()
 //-----------------------------------------------------------------------------
 void CBasePanel::RunMenuCommand(const char *command)
 {
+#ifdef PLATFORM_VITA
+	// the Vita's own screens (VitaMenu.cpp) in place of the PC's mouse dialogs
+	if ( !Q_stricmp( command, "OpenNewGameDialog" ) )
+	{
+		VitaMenu_OpenNewGame( this );
+		return;
+	}
+	if ( !Q_stricmp( command, "OpenLoadGameDialog" ) )
+	{
+		VitaMenu_OpenLoadGame( this );
+		return;
+	}
+	if ( !Q_stricmp( command, "OpenSaveGameDialog" ) )
+	{
+		VitaMenu_OpenSaveGame( this );
+		return;
+	}
+	if ( !Q_stricmp( command, "OpenOptionsDialog" ) || !Q_stricmp( command, "OpenControllerDialog" ) )
+	{
+		VitaMenu_OpenOptions( this );
+		return;
+	}
+	if ( !Q_stricmp( command, "Quit" ) )
+	{
+		VitaMenu_OpenQuit( this );
+		return;
+	}
+#endif
 	if ( !Q_stricmp( command, "OpenGameMenu" ) )
 	{
 		if ( m_pGameMenu )

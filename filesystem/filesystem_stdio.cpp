@@ -24,6 +24,12 @@
 #include "tier1/convar.h"
 #include "tier0/vcrmode.h"
 #include "tier0/vprof.h"
+#include "vita_perf.h"
+#ifdef PLATFORM_VITA
+#include <psp2/io/fcntl.h>
+#include <psp2/io/dirent.h>
+#include "tier1/utldict.h"
+#endif
 #include "tier1/fmtstr.h"
 #include "tier1/utlrbtree.h"
 #include "vstdlib/osversion.h"
@@ -156,6 +162,256 @@ private:
 #ifdef POSIX
 CUtlMap< ino_t, CThreadMutex * > CStdioFile::m_LockedFDMap;
 CThreadMutex	CStdioFile::m_MutexLockedFD;
+#endif
+
+
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// Directory listing cache. Most opens and stats during loads are probes for
+// loose files that don't exist (the content is in VPKs), and each failed
+// sceIoOpen costs milliseconds on a memory card. Listings (or "no such
+// directory") are read once per directory and answer misses from memory.
+// Only absolute device paths ("ux0:...") are cached; any write-mode open,
+// mkdir, unlink or rename clears the whole cache.
+//-----------------------------------------------------------------------------
+struct VitaDirListing_t
+{
+	bool bExists;
+	CUtlVector<uint32> nameHashes;	// sorted
+};
+static CUtlDict<VitaDirListing_t *, int> s_VitaDirs;
+// Held while a directory is listed from the card: a blocking mutex, so a
+// second thread sleeps instead of spinning for the whole read (one kernel
+// semaphore; see m_Mutex in CVitaReadOnlyFile for why that matters)
+static CThreadMutex s_VitaDirMutex;
+
+static uint32 VitaNameHash( const char *p, int len )
+{
+	uint32 h = 2166136261u;
+	for ( int i = 0; i < len; i++ )
+	{
+		h ^= (uint8)tolower( (unsigned char)p[i] );
+		h *= 16777619u;
+	}
+	return h;
+}
+
+static int VitaHashCompare( const void *a, const void *b )
+{
+	uint32 x = *(const uint32 *)a, y = *(const uint32 *)b;
+	return ( x < y ) ? -1 : ( x > y ) ? 1 : 0;
+}
+
+static VitaDirListing_t *VitaReadDir( const char *pszDir )
+{
+	VitaDirListing_t *pDir = new VitaDirListing_t;
+	SceUID dfd = sceIoDopen( pszDir );
+	pDir->bExists = ( dfd >= 0 );
+	if ( dfd >= 0 )
+	{
+		SceIoDirent ent;
+		memset( &ent, 0, sizeof( ent ) );
+		while ( sceIoDread( dfd, &ent ) > 0 )
+		{
+			pDir->nameHashes.AddToTail( VitaNameHash( ent.d_name, strlen( ent.d_name ) ) );
+			memset( &ent, 0, sizeof( ent ) );
+		}
+		sceIoDclose( dfd );
+		if ( pDir->nameHashes.Count() > 1 )
+			qsort( pDir->nameHashes.Base(), pDir->nameHashes.Count(), sizeof( uint32 ), VitaHashCompare );
+	}
+	return pDir;
+}
+
+// false only when the file certainly doesn't exist
+bool VitaDirCache_MayExist( const char *pszPath )
+{
+	if ( !strchr( pszPath, ':' ) )
+		return true;	// relative path: not cached
+	if ( strstr( pszPath, "/." ) || strstr( pszPath, "\\." ) )
+		return true;	// "." or ".." components: left to the real open
+
+	// normalize: forward slashes, no doubled slashes, lowercase
+	char szDir[MAX_PATH];
+	int nLen = 0;
+	for ( const char *p = pszPath; *p && nLen < (int)sizeof( szDir ) - 1; p++ )
+	{
+		char c = ( *p == '\\' ) ? '/' : (char)tolower( (unsigned char)*p );
+		if ( c == '/' && nLen && szDir[nLen - 1] == '/' )
+			continue;
+		szDir[nLen++] = c;
+	}
+	szDir[nLen] = '\0';
+	char *pSlash = strrchr( szDir, '/' );
+	if ( !pSlash || !pSlash[1] )
+		return true;
+	*pSlash = '\0';
+	const char *pszName = pSlash + 1;
+	uint32 nHash = VitaNameHash( pszName, strlen( pszName ) );
+
+	AUTO_LOCK( s_VitaDirMutex );
+	int idx = s_VitaDirs.Find( szDir );
+	if ( idx == s_VitaDirs.InvalidIndex() )
+		idx = s_VitaDirs.Insert( szDir, VitaReadDir( szDir ) );
+	VitaDirListing_t *pDir = s_VitaDirs[idx];
+	if ( !pDir->bExists )
+		return false;
+	return bsearch( &nHash, pDir->nameHashes.Base(), pDir->nameHashes.Count(), sizeof( uint32 ), VitaHashCompare ) != NULL;
+}
+
+void VitaDirCache_Clear()
+{
+	AUTO_LOCK( s_VitaDirMutex );
+	s_VitaDirs.PurgeAndDeleteElements();
+}
+#endif
+//-----------------------------------------------------------------------------
+
+#ifdef PLATFORM_VITA
+// Read-only files go straight to sceIo. newlib's stdio buffers 1KB at a time
+// here, so every large engine read became hundreds of card reads. Small reads
+// are served from a read-ahead buffer; larger ones go directly into the
+// caller's memory. Positional reads, so there is no seek syscall either.
+class CVitaReadOnlyFile : public CStdFilesystemFile
+{
+public:
+	static bool CanOpen( const char *options ) { return !strchr( options, 'w' ) && !strchr( options, 'a' ) && !strchr( options, '+' ); }
+	static CVitaReadOnlyFile *FS_fopen( const char *filename, int64 *size );
+
+	virtual ~CVitaReadOnlyFile() { free( m_pBuf ); }
+	virtual void FS_setbufsize( unsigned nBytes ) {}
+	virtual void FS_fclose() { sceIoClose( m_fd ); }
+	virtual void FS_fseek( int64 pos, int seekType );
+	virtual long FS_ftell() { return (long)m_Pos; }
+	virtual int FS_feof() { return m_Pos >= m_Size; }
+	virtual size_t FS_fread( void *dest, size_t destSize, size_t size );
+	virtual size_t FS_fwrite( const void *src, size_t size ) { return 0; }
+	virtual bool FS_setmode( FileMode_t mode ) { return false; }
+	virtual size_t FS_vfprintf( const char *fmt, va_list list ) { return 0; }
+	virtual int FS_ferror() { return 0; }
+	virtual int FS_fflush() { return 0; }
+	virtual char *FS_fgets( char *dest, int destSize );
+
+private:
+	enum { BUF_SIZE = 32 * 1024 };
+
+	CVitaReadOnlyFile( SceUID fd, int64 size ) : m_fd( fd ), m_Size( size ), m_Pos( 0 ), m_pBuf( NULL ), m_BufPos( 0 ), m_BufLen( 0 ) {}
+	size_t ReadLocked( byte *pDest, size_t size );
+	bool FillBuffer();
+
+	SceUID m_fd;
+	int64 m_Size;
+	int64 m_Pos;
+	byte *m_pBuf;
+	int64 m_BufPos;		// file offset of m_pBuf[0]
+	int m_BufLen;		// valid bytes in m_pBuf
+	// A spin lock, unlike s_VitaDirMutex: every pthread mutex owns a kernel
+	// semaphore on the Vita, and VPK reads already hold their chunk's lock
+	// around this file's, so it's never contended there
+	CThreadFastMutex m_Mutex;
+};
+
+CVitaReadOnlyFile *CVitaReadOnlyFile::FS_fopen( const char *filename, int64 *size )
+{
+	SceUID fd = sceIoOpen( filename, SCE_O_RDONLY, 0 );
+	if ( fd < 0 )
+		return NULL;
+	SceOff nSize = sceIoLseek( fd, 0, SCE_SEEK_END );
+	if ( nSize < 0 )
+	{
+		sceIoClose( fd );
+		return NULL;
+	}
+	if ( size )
+		*size = nSize;
+	return new CVitaReadOnlyFile( fd, nSize );
+}
+
+void CVitaReadOnlyFile::FS_fseek( int64 pos, int seekType )
+{
+	AUTO_LOCK( m_Mutex );
+	switch ( seekType )
+	{
+	case SEEK_SET: m_Pos = pos; break;
+	case SEEK_CUR: m_Pos += pos; break;
+	case SEEK_END: m_Pos = m_Size + pos; break;
+	}
+	if ( m_Pos < 0 )
+		m_Pos = 0;
+}
+
+bool CVitaReadOnlyFile::FillBuffer()
+{
+	if ( !m_pBuf )
+	{
+		m_pBuf = (byte *)malloc( BUF_SIZE );
+		if ( !m_pBuf )
+			return false;
+	}
+	int n = sceIoPread( m_fd, m_pBuf, BUF_SIZE, m_Pos );
+	m_BufPos = m_Pos;
+	m_BufLen = ( n > 0 ) ? n : 0;
+	return m_BufLen > 0;
+}
+
+size_t CVitaReadOnlyFile::ReadLocked( byte *pDest, size_t size )
+{
+	size_t nDone = 0;
+	while ( nDone < size && m_Pos < m_Size )
+	{
+		// from the read-ahead buffer
+		if ( m_BufLen && m_Pos >= m_BufPos && m_Pos < m_BufPos + m_BufLen )
+		{
+			size_t nAvail = (size_t)( m_BufPos + m_BufLen - m_Pos );
+			size_t n = Min( nAvail, size - nDone );
+			memcpy( pDest + nDone, m_pBuf + ( m_Pos - m_BufPos ), n );
+			nDone += n;
+			m_Pos += n;
+			continue;
+		}
+
+		size_t nLeft = size - nDone;
+		if ( nLeft >= BUF_SIZE / 2 )
+		{
+			// large: straight into the caller's memory
+			int n = sceIoPread( m_fd, pDest + nDone, nLeft, m_Pos );
+			if ( n <= 0 )
+				break;
+			nDone += n;
+			m_Pos += n;
+		}
+		else if ( !FillBuffer() )
+		{
+			break;
+		}
+	}
+	return nDone;
+}
+
+size_t CVitaReadOnlyFile::FS_fread( void *dest, size_t destSize, size_t size )
+{
+	AUTO_LOCK( m_Mutex );
+	return ReadLocked( (byte *)dest, size );
+}
+
+char *CVitaReadOnlyFile::FS_fgets( char *dest, int destSize )
+{
+	AUTO_LOCK( m_Mutex );
+	int i = 0;
+	while ( i < destSize - 1 )
+	{
+		byte c;
+		if ( ReadLocked( &c, 1 ) != 1 )
+			break;
+		dest[i++] = c;
+		if ( c == '\n' )
+			break;
+	}
+	if ( i == 0 )
+		return NULL;
+	dest[i] = '\0';
+	return dest;
+}
 #endif
 
 //-----------------------------------------------------------------------------
@@ -411,6 +667,7 @@ void CFileSystem_Stdio::FreeOptimalReadBuffer( void *p )
 //-----------------------------------------------------------------------------
 FILE *CFileSystem_Stdio::FS_fopen( const char *filenameT, const char *options, unsigned flags, int64 *size )
 {
+	VITA_PERF_SCOPE( VITA_PERF_FILE_OPEN );
 	CStdFilesystemFile *pFile = NULL;
 
 	char filename[ MAX_PATH ];
@@ -425,6 +682,24 @@ FILE *CFileSystem_Stdio::FS_fopen( const char *filenameT, const char *options, u
 		{
 			return (FILE *)pFile;
 		}
+	}
+#endif
+
+#ifdef PLATFORM_VITA
+	if ( CVitaReadOnlyFile::CanOpen( options ) )
+	{
+		if ( !VitaDirCache_MayExist( filename ) )
+			return NULL;
+		pFile = CVitaReadOnlyFile::FS_fopen( filename, size );
+		if ( pFile )
+		{
+			return (FILE *)pFile;
+		}
+	}
+	else
+	{
+		// files change: listings are re-read on demand
+		VitaDirCache_Clear();
 	}
 #endif
 
@@ -458,6 +733,7 @@ void CFileSystem_Stdio::FS_fclose( FILE *fp )
 //-----------------------------------------------------------------------------
 void CFileSystem_Stdio::FS_fseek( FILE *fp, int64 pos, int seekType )
 {
+	VITA_PERF_SCOPE( VITA_PERF_FILE_SEEK );
 	CStdFilesystemFile *pFile = ((CStdFilesystemFile *)fp);
 
 	pFile->FS_fseek( pos, seekType );
@@ -492,8 +768,10 @@ size_t CFileSystem_Stdio::FS_fread( void *dest, size_t destSize, size_t size, FI
 		tmPlotI32( TELEMETRY_LEVEL0, TMPT_MEMORY, 0, size, "FileBytesRead" );
 	}
 
+	VITA_PERF_SCOPE( VITA_PERF_FILE_READ );
 	CStdFilesystemFile *pFile = ((CStdFilesystemFile *)fp);
 	size_t nBytesRead = pFile->FS_fread( dest, destSize, size);
+	VITA_PERF_AMOUNT( nBytesRead );
 
 	Trace_FRead( nBytesRead, fp );
 
@@ -693,6 +971,14 @@ int CFileSystem_Stdio::FS_stat( const char *pathT, struct _stat *buf, bool *pbLo
 
 	CBaseFileSystem::FixUpPath ( pathT, path, sizeof( path ) );
 
+#ifdef PLATFORM_VITA
+	if ( !VitaDirCache_MayExist( path ) )
+	{
+		errno = ENOENT;
+		return -1;
+	}
+#endif
+
 	int rt = _stat( path, buf );
 
 	// Workaround bug wherein stat() randomly fails on Windows XP.  See comment on function.
@@ -858,6 +1144,12 @@ CStdioFile *CStdioFile::FS_fopen( const char *filenameT, const char *options, in
 
 
 	pFile = fopen(filename, options);
+#ifdef PLATFORM_VITA
+	// newlib buffers 1 KB per FILE: a multi-MB save or level transition file
+	// was thousands of sceIoWrite calls. Read-only opens use CVitaReadOnlyFile
+	if ( pFile && ( strchr( options, 'w' ) || strchr( options, 'a' ) || strchr( options, '+' ) ) )
+		setvbuf( pFile, NULL, _IOFBF, 64 * 1024 );
+#endif
 	if (pFile && size)
 	{
 		// todo: replace with filelength()? 
@@ -897,7 +1189,9 @@ CStdioFile *CStdioFile::FS_fopen( const char *filenameT, const char *options, in
 		if ( strchr(options,'w') || strchr(options,'a') )
 			bWriteable = true;
 		
-#if defined POSIX
+#if defined( POSIX ) && !defined( PLATFORM_VITA )
+		// (not on the Vita: inode numbers there don't identify files, and the
+		// key at open could come from an unfilled stat buffer)
 		if ( bWriteable )
 		{
 			CThreadMutex *pMutex = NULL;
@@ -968,7 +1262,7 @@ void CStdioFile::FS_setbufsize( unsigned nBytes )
 //-----------------------------------------------------------------------------
 void CStdioFile::FS_fclose()
 {
-#ifdef POSIX
+#if defined( POSIX ) && !defined( PLATFORM_VITA )
 	if ( m_bWriteable )
 	{
 		AUTO_LOCK( m_MutexLockedFD );

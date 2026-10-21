@@ -1186,7 +1186,14 @@ int CPackedStore::ReadData( CPackedStoreFileHandle &handle, void *pOutData, int 
 				nDesiredPos += m_nDirectoryDataSize + sizeof( VPKDirHeader_t );
 			}
 
+#ifdef PLATFORM_VITA
+			// No 1MB read cache: misses read a whole megabyte for every small
+			// file, and each store kept up to 4MB of cache buffers. The
+			// filesystem's own read-ahead covers small sequential reads.
+			if ( false )
+#else
 			if ( m_PackedStoreReadCache.BCanSatisfyFromReadCache( (uint8 *)pOutData, handle, fHandle, nDesiredPos, nNumBytes, nRead ) )
+#endif
 			{
 				handle.m_nCurrentFileOffset += nRead;
 			}

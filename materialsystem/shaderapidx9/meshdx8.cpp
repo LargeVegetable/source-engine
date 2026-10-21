@@ -55,6 +55,11 @@
 // this is hooked into the engines convar
 extern ConVar mat_debugalttab;
 
+#ifdef PLATFORM_VITA
+static ConVar vita_mesh_frame_discard( "vita_mesh_frame_discard", "2", FCVAR_NONE, "Vita: discard the dynamic vertex and index buffers every frame (1, as on PC), only when full (0: ~6-14 MB less graphics memory held), or every frame only while a menu is up (2, default; the main menu flickered black with 0)" );
+extern "C" int so_menus_visible( void );	// launcher, set by the engine each frame
+#endif
+
 //#define DRAW_SELECTION 1
 static bool g_bDrawSelection = true;	// only used in DRAW_SELECTION 
 static unsigned short g_nScratchIndexBuffer[6]; // large enough for a fast quad; used when device is not active
@@ -5083,6 +5088,19 @@ void CMeshMgr::DiscardVertexBuffers()
 	// This shouldn't be necessary, but it seems to be on GeForce 2
 	// It helps when running WC and the engine simultaneously.
 	ResetMeshRenderState();
+
+#ifdef PLATFORM_VITA
+	// Each discard makes ToGL replace the buffer (glBufferData), which vitaGL
+	// can't reuse for 5 frames: done every frame, the 1.5 MB vertex buffers
+	// and 64 KB index buffer keep 8-15 MB of graphics memory as spares.
+	// Appending across frames freed it in game, but the main menu
+	// flickered black: menus keep the per-frame discard. vitaGL now also
+	// keeps memory a draw used in the last frames even when replaced right
+	// after an unmap, a likely cause of the flicker
+	const int nVitaMode = vita_mesh_frame_discard.GetInt();
+	if ( nVitaMode == 0 || ( nVitaMode == 2 && !so_menus_visible() ) )
+		return;
+#endif
 
 	if ( !g_pShaderDeviceDx8->IsDeactivated() )
 	{

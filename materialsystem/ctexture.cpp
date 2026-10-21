@@ -174,6 +174,20 @@ enum InternalTextureFlags
 static int  GetThreadId();
 static bool SLoadTextureBitsFromFile( IVTFTexture **ppOutVtfTexture, FileHandle_t hFile, unsigned int nFlags, TextureLODControlSettings_t* pInOutCachedFileLodSettings, int nDesiredDimensionLimit, unsigned short* pOutStreamedMips, const char* pName, const char* pCacheFileName, TexDimensions_t* pOptOutMappingDims = NULL, TexDimensions_t* pOptOutActualDims = NULL, TexDimensions_t* pOptOutAllocatedDims = NULL, unsigned int* pOptOutStripFlags = NULL );
 static int  ComputeActualMipCount( const TexDimensions_t& actualDims, unsigned int nFlags );
+#ifdef PLATFORM_VITA
+ConVar mat_picmip_min_size( "mat_picmip_min_size", "64", FCVAR_NONE, "Vita: mat_picmip stops halving a texture once its shorter side reaches this size (4 = stock)" );
+ConVar mat_picmip_alphatest_min_size( "mat_picmip_alphatest_min_size", "256", FCVAR_NONE, "Vita: the same floor for the base textures of alpha-tested materials (fences, grates, foliage), whose thin holes picmip blurs away" );
+ConVar mat_picmip_viewmodel_min_size( "mat_picmip_viewmodel_min_size", "256", FCVAR_NONE, "Vita: the same floor for first-person weapon and hand textures (models/weapons/v_*), which fill much of the screen" );
+ConVar mat_vita_texture_max_kb( "mat_vita_texture_max_kb", "4096", FCVAR_NONE, "Vita: textures whose whole image (all frames and faces) is bigger than this load at half size, down to 64 pixels (0 = no cap)" );
+// Set by CBaseShader::LoadTexture (shaderlib/BaseShader.cpp) on the base
+// texture of an alpha-tested material; an unused VTF flag bit
+#define TEXTUREFLAGS_VITA_ALPHATEST TEXTUREFLAGS_UNUSED_00400000
+// A VTF's own flags with that bit cleared (old tools may have set it)
+#define VITA_VTF_FLAGS( pVTF ) ( ( pVTF )->Flags() & ~TEXTUREFLAGS_VITA_ALPHATEST )
+#else
+#define VITA_VTF_FLAGS( pVTF ) ( ( pVTF )->Flags() )
+#endif
+
 static int  ComputeMipSkipCount( const char* pName, const TexDimensions_t& mappingDims, bool bIgnorePicmip, IVTFTexture *pOptVTFTexture, unsigned int nFlags, int nDesiredDimensionLimit, unsigned short* pOutStreamedMips, TextureLODControlSettings_t* pInOutCachedFileLodSettings, TexDimensions_t* pOptOutActualDims, TexDimensions_t* pOptOutAllocatedDims, unsigned int* pOptOutStripFlags  );
 static int  GetOptimalReadBuffer( CUtlBuffer *pOutOptimalBuffer, FileHandle_t hFile, int nFileSize );
 static void FreeOptimalReadBuffer( int nMaxSize );
@@ -2838,7 +2852,7 @@ void CTexture::Precache()
 	m_dimsMapping.m_nWidth = pVTFTexture->Width();
 	m_dimsMapping.m_nHeight = pVTFTexture->Height();
 	m_dimsMapping.m_nDepth = pVTFTexture->Depth();
-	m_nFlags = pVTFTexture->Flags() | nAdditionalFlags;
+	m_nFlags = VITA_VTF_FLAGS( pVTFTexture ) | nAdditionalFlags;
 	m_nFrameCount = pVTFTexture->FrameCount();
 	if ( !m_pTextureHandles )
 	{
@@ -3286,7 +3300,7 @@ IVTFTexture *CTexture::LoadTextureBitsFromFile( char *pCacheFileName, char **ppR
 			  m_dimsMapping.m_nHeight,
 			  m_dimsMapping.m_nDepth,
 			  pVTFTexture->Format(),
-			  pVTFTexture->Flags() | nPreserveFlags,
+			  VITA_VTF_FLAGS( pVTFTexture ) | nPreserveFlags,
 			  pVTFTexture->FrameCount()
 		);
 
@@ -4211,7 +4225,7 @@ bool SLoadTextureBitsFromFile( IVTFTexture **ppOutVtfTexture, FileHandle_t hFile
 		( *pOptOutDimsMapping ) = dimsMappingCurrent;
 
 
-	int nFullFlags = ( *ppOutVtfTexture )->Flags() 
+	int nFullFlags = VITA_VTF_FLAGS( *ppOutVtfTexture )
 		           | nFlags;
 
 	// Seek the reading back to the front of the buffer
@@ -4406,11 +4420,25 @@ int ComputeMipSkipCount( const char* pName, const TexDimensions_t& mappingDims, 
 		if ( !( nFlags & TEXTUREFLAGS_NOLOD ) &&
 			  ( g_config.skipMipLevels > 0 ) )
 		{
+#ifdef PLATFORM_VITA
+			// picmip 3 took 128x128 textures such as glass, decals and signs
+			// to 16x16 (window glass drew as blue/white blocks); stop
+			// halving once the shorter side reaches mat_picmip_min_size
+			extern ConVar mat_picmip_min_size, mat_picmip_alphatest_min_size, mat_picmip_viewmodel_min_size;
+			int nMinSize = mat_picmip_min_size.GetInt();
+			if ( nFlags & TEXTUREFLAGS_VITA_ALPHATEST )
+				nMinSize = MAX( nMinSize, mat_picmip_alphatest_min_size.GetInt() );
+			if ( pName && !V_strnicmp( pName, "models/weapons/v_", 17 ) )
+				nMinSize = MAX( nMinSize, mat_picmip_viewmodel_min_size.GetInt() );
+			nMinSize = MAX( nMinSize, 4 );
+#else
+			const int nMinSize = 4;
+#endif
 			for ( int iDegrade = 0; iDegrade < g_config.skipMipLevels; ++ iDegrade )
 			{
 				// don't go lower than 4, or dxt textures won't work properly
-				if ( nClampX > 4 &&
-					 nClampY > 4 )
+				if ( nClampX > nMinSize &&
+					 nClampY > nMinSize )
 				{
 					nClampX >>= 1;
 					nClampY >>= 1;
@@ -4434,6 +4462,37 @@ int ComputeMipSkipCount( const char* pName, const TexDimensions_t& mappingDims, 
 			}
 		}
 	}
+
+#ifdef PLATFORM_VITA
+	// The whole image (every frame and face) is one heap block while it
+	// loads. The picmip floors (alpha-tested 256, NOLOD) let a 29-frame
+	// 256x256 RGBA texture through at 10 MB, and the heap had no hole that
+	// big (a d2_prison_02 load). Halve such textures until they fit,
+	// down to 64 pixels and never past the file's own mips
+	if ( pOptVTFTexture && actualDims.m_nDepth == 1 && mat_vita_texture_max_kb.GetInt() > 0 )
+	{
+		const int nImages = pOptVTFTexture->FrameCount() * pOptVTFTexture->FaceCount();
+		const bool bMips = pOptVTFTexture->MipCount() > 1;
+		const int nMaxBytes = mat_vita_texture_max_kb.GetInt() * 1024;
+		int nSkipped = 0;
+		for ( int w = actualDims.m_nWidth; w > nClampX; w >>= 1 )
+			nSkipped++;
+		const int nOrigX = nClampX, nOrigY = nClampY;
+		const int nOrigBytes = ImageLoader::GetMemRequired( nClampX, nClampY, 1, pOptVTFTexture->Format(), bMips ) * nImages;
+		int nBytes = nOrigBytes;
+		while ( nBytes > nMaxBytes && nClampX > 64 && nClampY > 64 && nSkipped + 1 < pOptVTFTexture->MipCount() )
+		{
+			nClampX >>= 1;
+			nClampY >>= 1;
+			nSkipped++;
+			nBytes = ImageLoader::GetMemRequired( nClampX, nClampY, 1, pOptVTFTexture->Format(), bMips ) * nImages;
+		}
+		static int s_nCapped = 0;
+		if ( nBytes != nOrigBytes && s_nCapped++ < 32 )
+			Msg( "[vita] texture %s: %d image(s) at %dx%d (%d KB) loaded at %dx%d (%d KB)\n", pName, nImages,
+				nOrigX, nOrigY, nOrigBytes / 1024, nClampX, nClampY, nBytes / 1024 );
+	}
+#endif
 
 	//
 	// Now use hardware settings to clamp our "clamping dimensions"

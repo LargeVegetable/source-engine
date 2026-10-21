@@ -54,7 +54,9 @@ typedef int socklen_t;
 #include <netdb.h>
 #include <sys/param.h>
 #include <sys/ioctl.h>
+#ifndef PLATFORM_VITA
 #include <sys/uio.h>
+#endif
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>

@@ -40,7 +40,13 @@ struct DataCacheItemData_t
 //-------------------------------------
 
 #define DC_NO_NEXT_LOCKED ((DataCacheItem_t *)-1)
+#ifdef PLATFORM_VITA
+// main, queued render thread, two job workers, plus spare: with 4, a fifth
+// model-cache user sleeps in 1 ms steps until a slot frees
+#define DC_MAX_THREADS_FRAMELOCKED 8
+#else
 #define DC_MAX_THREADS_FRAMELOCKED 4
+#endif
 
 struct DataCacheItem_t : DataCacheItemData_t
 {

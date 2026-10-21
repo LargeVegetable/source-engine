@@ -1410,6 +1410,13 @@ bool NET_ReceiveDatagram ( const int sock, netpacket_t * packet )
 	struct sockaddr	from;
 	int				fromlen = sizeof(from);
 	int				net_socket = net_sockets[packet->source].hUDP;
+#ifdef PLATFORM_VITA
+	// Single player opens no sockets (hUDP 0 = closed), but the client polled
+	// recvfrom( 0 ) every frame: newlib's fd table lock, which a file read on
+	// another thread can hold (the engine thread blocked 5-10 ms there)
+	if ( !net_socket )
+		return false;
+#endif
 
 	int ret = 0;
 	{

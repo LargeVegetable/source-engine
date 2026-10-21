@@ -527,6 +527,11 @@ const CPUInformation* GetCPUInformation()
 #elif defined( _X360 )
 	pi.m_nPhysicalProcessors = 3;
 	pi.m_nLogicalProcessors  = 6;
+#elif defined(PLATFORM_VITA)
+	// No /proc/cpuinfo. Applications get three of the four Cortex-A9 cores
+	// (the fourth is mostly reserved for the system).
+	pi.m_nPhysicalProcessors = 3;
+	pi.m_nLogicalProcessors  = 3;
 #elif defined(_LINUX)
 	// TODO: poll /dev/cpuinfo when we have some benefits from multithreading
 	FILE *fpCpuInfo = fopen( "/proc/cpuinfo", "r" );

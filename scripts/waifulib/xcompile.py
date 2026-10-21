@@ -321,8 +321,39 @@ def options(opt):
 	android = opt.add_option_group('Android options')
 	android.add_option('--android', action='store', dest='ANDROID_OPTS', default=None,
 		help='enable building for android, format: --android=<arch>,<toolchain>,<api>, example: --android=armeabi-v7a-hard,4.9,21')
+	vita = opt.add_option_group('PS Vita options')
+	vita.add_option('--vita', action='store_true', dest='VITA', default=False,
+		help='enable building for PS Vita, requires VITASDK environment variable')
+
+VITA_CFLAGS = ['-mcpu=cortex-a9', '-mfpu=neon', '-mfloat-abi=hard', '-mthumb', '-fno-short-enums']
+
+def configure_vita(conf):
+	vitasdk = conf.environ.get('VITASDK')
+	if not vitasdk or not os.path.isdir(vitasdk):
+		conf.fatal('VITASDK environment variable must point to an installed VitaSDK')
+
+	bindir = os.path.join(vitasdk, 'bin')
+	conf.environ['CC'] = os.path.join(bindir, 'arm-vita-eabi-gcc')
+	conf.environ['CXX'] = os.path.join(bindir, 'arm-vita-eabi-g++')
+	conf.environ['AR'] = os.path.join(bindir, 'arm-vita-eabi-ar')
+	conf.environ['STRIP'] = os.path.join(bindir, 'arm-vita-eabi-strip')
+	conf.environ['OBJCOPY'] = os.path.join(bindir, 'arm-vita-eabi-objcopy')
+	conf.env.CFLAGS += VITA_CFLAGS
+	conf.env.CXXFLAGS += VITA_CFLAGS
+	# Source relies on 4-byte enums (datadesc FIELD_INTEGER etc.), while VitaSDK
+	# libraries default to short enums; enum-typed fields crossing that boundary
+	# (e.g. SDL_GameControllerButtonBind) must be handled with care
+	conf.env.LINKFLAGS += VITA_CFLAGS + ['-Wl,--no-enum-size-warning']
+
+	conf.env.HAVE_M = True
+	conf.env.LIB_M = ['m']
+	conf.env.DEST_OS2 = 'vita'
+	conf.msg('Selected VitaSDK', vitasdk)
 
 def configure(conf):
+	if conf.options.VITA:
+		configure_vita(conf)
+
 	if conf.options.ANDROID_OPTS:
 		values = conf.options.ANDROID_OPTS.split(',')
 		if len(values) != 3:
@@ -368,12 +399,28 @@ def configure(conf):
 		# conf.env.ANDROID_OPTS = android
 		conf.env.DEST_OS2 = 'android'
 
-	MACRO_TO_DESTOS = OrderedDict({ '__ANDROID__' : 'android' })
+	MACRO_TO_DESTOS = OrderedDict({ '__ANDROID__' : 'android', '__vita__' : 'vita' })
 	for k in c_config.MACRO_TO_DESTOS:
 		MACRO_TO_DESTOS[k] = c_config.MACRO_TO_DESTOS[k] # ordering is important
 	c_config.MACRO_TO_DESTOS  = MACRO_TO_DESTOS
 
+def configure_vita_shlib(conf):
+	# Engine modules are loaded by our own ELF loader at runtime, which
+	# resolves imports (libc, libstdc++, libgcc, Sce*) against the main
+	# executable, so shared objects are linked without startfiles or any
+	# libraries and with unresolved symbols allowed. Modules are never
+	# unloaded, so a null __dso_handle (normally from crtbegin) is enough.
+	# Must run after the compiler tool, which resets these to ['-shared'].
+	conf.env.LINKFLAGS_cshlib = conf.env.LINKFLAGS_cxxshlib = [
+		'-shared', '-nostdlib', '-nostartfiles',
+		'-Wl,--unresolved-symbols=ignore-all',
+		'-Wl,--defsym=__dso_handle=0'
+	]
+
 def post_compiler_cxx_configure(conf):
+	if conf.env.DEST_OS == 'vita':
+		conf.env.DEST_CPU = 'arm' # waf reports 'thumb' from __thumb__
+		configure_vita_shlib(conf)
 	conf.msg('Target OS', conf.env.DEST_OS)
 	conf.msg('Target CPU', conf.env.DEST_CPU)
 	conf.msg('Target binfmt', conf.env.DEST_BINFMT)
@@ -385,6 +432,9 @@ def post_compiler_cxx_configure(conf):
 	return
 
 def post_compiler_c_configure(conf):
+	if conf.env.DEST_OS == 'vita':
+		conf.env.DEST_CPU = 'arm' # waf reports 'thumb' from __thumb__
+		configure_vita_shlib(conf)
 	conf.msg('Target OS', conf.env.DEST_OS)
 	conf.msg('Target CPU', conf.env.DEST_CPU)
 	conf.msg('Target binfmt', conf.env.DEST_BINFMT)

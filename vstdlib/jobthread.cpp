@@ -23,6 +23,12 @@
 #include "xbox/xbox_win32stubs.h"
 #endif
 
+#ifdef PLATFORM_VITA
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/cpu.h>
+#include "vita_perf.h"
+#endif
+
 #include "tier0/memdbgon.h"
 
 
@@ -381,6 +387,26 @@ private:
 #endif
 #else // !win32
 		bool bSet = false;
+#ifdef PLATFORM_VITA
+		// The stock loop below slept up to 100 ms on the shared queue alone, so
+		// a job sent to this thread's direct queue (the server frame, see
+		// engine/host.cpp) or a master call waited until some shared job or the
+		// timeout woke it: the main thread then waited 7-18 ms a frame for the
+		// server. Check every queue and calls each round, waiting at most 1 ms
+		// (~1000 short waits a second when idle). The wait is where a job wakes
+		// the thread at once; elsewhere it's seen within ~1-2 ms: worker 0 (the
+		// server's, engine/host.cpp) waits on its direct queue, the others on
+		// the shared queue
+		const bool bVitaDirect = ( m_iThread == 0 );
+		while( !bSet )
+		{
+			bSet = m_DirectQueue.GetEventHandle().Wait( bVitaDirect ? 1 : 0 );
+			if ( !bSet )
+				bSet = GetCallHandle().Wait( 0 );
+			if ( !bSet )
+				bSet = m_SharedQueue.GetEventHandle().Wait( bVitaDirect ? 0 : 1 );
+		}
+#else
 		int nWaitTime = 100;
 
 		while( !bSet )
@@ -392,6 +418,7 @@ private:
 			if ( !bSet )
 				bSet = GetCallHandle().Wait( 0 );
 		}
+#endif
 
 		if ( !bSet )
 			waitResult = WAIT_TIMEOUT;
@@ -403,7 +430,15 @@ private:
 
 	int Run()
 	{
-
+#ifdef PLATFORM_VITA
+		// Main job pool workers on cores 1 and 2 (the engine thread is on
+		// core 0); left unpinned, Vita threads don't spread across cores
+		if ( (IThreadPool *)m_pOwner == g_pThreadPool )
+		{
+			sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 << ( m_iThread % 2 ) );
+			so_thread_register( m_iThread == 0 ? "worker 0 (server)" : m_iThread == 1 ? "worker 1" : "worker" );
+		}
+#endif
 
 		// Wait for either a call from the master thread, or an item in the queue...
 		unsigned waitResult;
@@ -1326,7 +1361,11 @@ void TestForcedExecute()
 			params.fDistribute = TRS_TRUE;
 			g_pTestThreadPool->Start( params, "Tst" );
 
+#ifdef PLATFORM_VITA
+			static CExecuteTestJob jobs[40];	// a test; 4000 is 390 KB of static memory
+#else
 			static CExecuteTestJob jobs[4000];
+#endif
 			for ( int j = 0; j < ARRAYSIZE(jobs); j++ )
 			{
 				g_ReadyToExecute = false;

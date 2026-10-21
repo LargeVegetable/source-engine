@@ -145,6 +145,27 @@ CON_COMMAND( hud_reloadscheme, "Reloads hud layout and animation scripts." )
 	mode->ReloadScheme();
 }
 
+#ifdef PLATFORM_VITA
+// HUD size (the HUD is hard to read at 368 lines). vgui2's Scheme.cpp
+// scales ClientScheme.res by the launcher's value, which this sets; the HUD
+// reloads to apply it. The options menu's Video tab has it
+extern "C" float so_hud_scale( void );
+extern "C" void so_set_hud_scale( float flScale );
+static void VitaHudSizeChanged( IConVar *pVar, const char *pOldValue, float flOldValue );
+static ConVar vita_hud_size( "vita_hud_size", "1", FCVAR_NONE, "Vita: HUD size: 0 normal, 1 large (default), 2 larger", true, 0, true, 2, VitaHudSizeChanged );
+
+static void VitaHudSizeChanged( IConVar *pVar, const char *pOldValue, float flOldValue )
+{
+	static const float s_flScales[] = { 1.0f, 1.25f, 1.5f };
+	float flScale = s_flScales[ clamp( vita_hud_size.GetInt(), 0, 2 ) ];
+	if ( flScale == so_hud_scale() )
+		return;
+	so_set_hud_scale( flScale );
+	if ( GetClientModeNormal() )
+		engine->ClientCmd_Unrestricted( "hud_reloadscheme" );
+}
+#endif
+
 CON_COMMAND( messagemode, "Opens chat dialog" )
 {
 	ClientModeShared *mode = ( ClientModeShared * )GetClientModeNormal();

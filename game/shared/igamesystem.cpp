@@ -16,6 +16,8 @@
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
+#include "vita_perf.h"
+
 #include "tier0/memdbgon.h"
 
 // Pointer to a member method of IGameSystem
@@ -377,6 +379,9 @@ void InvokePerFrameMethod( PerFrameGameSystemFunc_t f, char const *timed /*=0*/ 
 	{
 		IGameSystemPerFrame *sys  = s_GameSystemsPerFrame[i];
 		MDLCACHE_CRITICAL_SECTION();
+#if defined( PLATFORM_VITA ) && defined( GAME_DLL )
+		VITA_PROFILE_SCOPE( sys->Name() );
+#endif
 		(sys->*f)();
 	}
 }

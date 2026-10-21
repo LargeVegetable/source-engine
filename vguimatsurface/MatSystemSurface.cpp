@@ -69,6 +69,9 @@ ILauncherMgr *g_pLauncherMgr = NULL;
 
 #pragma warning( default : 4706 )
 
+#include "vita_perf.h"
+
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -138,6 +141,78 @@ private:
 vgui::IInputInternal		*g_pIInput;
 static bool					g_bInDrawing;
 static CFontTextureCache	g_FontTextureCache;
+
+#ifdef PLATFORM_VITA
+// Text drew each character with ~5 lookups (the font manager's advance
+// widths, the font texture cache's page and coordinates: handle tables and
+// trees), ~4 us a character on the Vita (subtitles cost up to 1.5 ms
+// a frame). A direct-mapped cache in front of both; any change to fonts or to
+// the font texture cache bumps the generation, which empties it
+unsigned g_nVitaGlyphGeneration = 1;	// FontTextureCache.cpp bumps it too
+
+struct VitaGlyph_t
+{
+	unsigned gen;
+	vgui::HFont font;
+	wchar_t ch;
+	int drawType;
+	int abcA, abcB, abcC;
+	int texState;	// 0 not asked yet, 1 has a texture, 2 none
+	int texId;
+	float tex[4];
+};
+static VitaGlyph_t s_VitaGlyphs[1024];
+
+static VitaGlyph_t &VitaGlyph( vgui::HFont font, wchar_t ch, int drawType )
+{
+	unsigned h = ( (unsigned)font * 2654435761u ) ^ ( (unsigned)ch * 40503u ) ^ ( (unsigned)drawType << 9 );
+	VitaGlyph_t &g = s_VitaGlyphs[ ( h ^ ( h >> 16 ) ) & 1023 ];
+	if ( g.gen != g_nVitaGlyphGeneration || g.font != font || g.ch != ch || g.drawType != drawType )
+	{
+		g.gen = g_nVitaGlyphGeneration;
+		g.font = font;
+		g.ch = ch;
+		g.drawType = drawType;
+		FontManager().GetCharABCwide( font, ch, g.abcA, g.abcB, g.abcC );
+		g.texState = 0;
+	}
+	return g;
+}
+
+// The glyph's texture page and coordinates, as GetTextureForChar gives them
+static bool VitaGlyphTexture( VitaGlyph_t &g, int *pTexId, const float **ppTexCoords )
+{
+	if ( !g.texState )
+	{
+		float *texCoords = NULL;
+		int texId = 0;
+		const unsigned gen = g_nVitaGlyphGeneration;
+		const bool bOk = g_FontTextureCache.GetTextureForChar( g.font, (vgui::FontDrawType_t)g.drawType, g.ch, &texId, &texCoords ) && texCoords;
+		if ( gen != g_nVitaGlyphGeneration )
+		{
+			// the cache was reset under us: answer, but don't keep it
+			g.gen = 0;
+			if ( !bOk )
+				return false;
+			memcpy( g.tex, texCoords, sizeof( g.tex ) );
+			*pTexId = texId;
+			*ppTexCoords = g.tex;
+			return true;
+		}
+		g.texState = bOk ? 1 : 2;
+		if ( bOk )
+		{
+			g.texId = texId;
+			memcpy( g.tex, texCoords, sizeof( g.tex ) );
+		}
+	}
+	if ( g.texState != 1 )
+		return false;
+	*pTexId = g.texId;
+	*ppTexCoords = g.tex;
+	return true;
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Singleton instance
@@ -1228,7 +1303,9 @@ void CMatSystemSurface::DrawFilledRectArray( IntRect *pRects, int numRects )
 		InitVertex( rect[0], pRects[i].x0, pRects[i].y0, 0, 0 );
 		InitVertex( rect[1], pRects[i].x1, pRects[i].y1, 0, 0 );
 		
-		ClipRect( rect[0], rect[1], &clippedRect[0], &clippedRect[1] );
+		// a fully clipped rect leaves clippedRect unset: draw it degenerate
+		if ( !ClipRect( rect[0], rect[1], &clippedRect[0], &clippedRect[1] ) )
+			clippedRect[0] = clippedRect[1] = rect[0];
 	
 		vgui::Vertex_t &ul = clippedRect[0];
 		vgui::Vertex_t &lr = clippedRect[1];
@@ -1636,6 +1713,37 @@ void CMatSystemSurface::DrawTexturedRect( int x0, int y0, int x1, int y1 )
 //-----------------------------------------------------------------------------
 // Draws a textured rectangle
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+void CMatSystemSurface::DrawTexturedSubRectArray( const int *pRects, const float *pTex, int nRects )
+{
+	MAT_FUNC;
+
+	Assert( g_bInDrawing );
+
+	if ( m_DrawColor[3] == 0 || nRects <= 0 )
+		return;
+
+	float s0, t0, s1, t1;
+	TextureDictionary()->GetTextureTexCoords( m_iBoundTexture, s0, t0, s1, t1 );
+	float ssize = s1 - s0;
+	float tsize = t1 - t0;
+
+	vgui::Vertex_t verts[2 * 16];
+	nRects = MIN( nRects, 16 );
+	for ( int i = 0; i < nRects; i++ )
+	{
+		const int *r = pRects + 4 * i;
+		const float *t = pTex + 4 * i;
+		InitVertex( verts[2 * i], r[0], r[1], s0 + t[0] * ssize, t0 + t[1] * tsize );
+		InitVertex( verts[2 * i + 1], r[2], r[3], s0 + t[2] * ssize, t0 + t[3] * tsize );
+	}
+
+	IMaterial *pMaterial = TextureDictionary()->GetTextureMaterial( m_iBoundTexture );
+	InternalSetMaterial( pMaterial );
+	DrawQuadArray( nRects, verts, m_DrawColor, true );	// clips each rect, skips fully clipped ones
+}
+#endif
+
 void CMatSystemSurface::DrawTexturedSubRect( int x0, int y0, int x1, int y1, float texs0, float text0, float texs1, float text1 )
 {
 	MAT_FUNC;
@@ -1755,6 +1863,9 @@ HFont CMatSystemSurface::CreateFont()
 //-----------------------------------------------------------------------------
 bool CMatSystemSurface::SetFontGlyphSet(HFont font, const char *windowsFontName, int tall, int weight, int blur, int scanlines, int flags, int nRangeMin, int nRangeMax)
 {
+#ifdef PLATFORM_VITA
+	g_nVitaGlyphGeneration++;	// the font's widths and glyphs change
+#endif
 	return FontManager().SetFontGlyphSet(font, windowsFontName, tall, weight, blur, scanlines, flags, nRangeMin, nRangeMax);
 }
 
@@ -1763,6 +1874,9 @@ bool CMatSystemSurface::SetFontGlyphSet(HFont font, const char *windowsFontName,
 //-----------------------------------------------------------------------------
 bool CMatSystemSurface::SetBitmapFontGlyphSet(HFont font, const char *windowsFontName, float scalex, float scaley, int flags)
 {
+#ifdef PLATFORM_VITA
+	g_nVitaGlyphGeneration++;	// the font's widths and glyphs change
+#endif
 	return FontManager().SetBitmapFontGlyphSet(font, windowsFontName, scalex, scaley, flags);
 }
 
@@ -2254,6 +2368,9 @@ void CMatSystemSurface::DrawUnicodeChar(wchar_t ch, FontDrawType_t drawType /*= 
 	// skip fully transparent characters
 	if ( m_DrawTextColor[3] == 0 )
 		return;
+#ifdef PLATFORM_VITA
+	so_perf_count( VITA_PERF_VGUI_CHARS, 1 );	// the frame line's vgui chars
+#endif
 	//hushed MAT_FUNC;
 
 	CharRenderInfo info;
@@ -2288,7 +2405,14 @@ bool CMatSystemSurface::DrawGetUnicodeCharRenderInfo( wchar_t ch, CharRenderInfo
 	info.currentFont = m_hCurrentFont;
 	info.fontTall = GetFontTall(m_hCurrentFont);
 
+#ifdef PLATFORM_VITA
+	VitaGlyph_t &vitaGlyph = VitaGlyph( m_hCurrentFont, ch, info.drawType );
+	info.abcA = vitaGlyph.abcA;
+	info.abcB = vitaGlyph.abcB;
+	info.abcC = vitaGlyph.abcC;
+#else
 	GetCharABCwide(m_hCurrentFont, ch, info.abcA, info.abcB, info.abcC);
+#endif
 	bool bUnderlined = FontManager().GetFontUnderlined( m_hCurrentFont );
 	
 	// Do prestep before generating texture coordinates, etc.
@@ -2299,8 +2423,13 @@ bool CMatSystemSurface::DrawGetUnicodeCharRenderInfo( wchar_t ch, CharRenderInfo
 
 	// get the character texture from the cache
 	info.textureId = 0;
+#ifdef PLATFORM_VITA
+	const float *texCoords = NULL;
+	if ( !VitaGlyphTexture( vitaGlyph, &info.textureId, &texCoords ) )
+#else
 	float *texCoords = NULL;
 	if (!g_FontTextureCache.GetTextureForChar(m_hCurrentFont, info.drawType, ch, &info.textureId, &texCoords))
+#endif
 	{
 		info.valid = false;
 		return info.valid;
@@ -2397,6 +2526,9 @@ void CMatSystemSurface::DrawPrintText(const wchar_t *text, int iTextLen, FontDra
 
 	if (!m_hCurrentFont)
 		return;
+#ifdef PLATFORM_VITA
+	so_perf_count( VITA_PERF_VGUI_CHARS, iTextLen );	// the frame line's vgui chars
+#endif
 
 	int x = m_pDrawTextPos[0] + m_nTranslateX;
 	int y = m_pDrawTextPos[1] + m_nTranslateY;
@@ -2439,7 +2571,14 @@ void CMatSystemSurface::DrawPrintText(const wchar_t *text, int iTextLen, FontDra
 		}
 #else
 		int abcA,abcB,abcC;
+#ifdef PLATFORM_VITA
+		VitaGlyph_t &vitaGlyph = VitaGlyph( m_hCurrentFont, ch, drawType );
+		abcA = vitaGlyph.abcA;
+		abcB = vitaGlyph.abcB;
+		abcC = vitaGlyph.abcC;
+#else
 		GetCharABCwide(m_hCurrentFont, ch, abcA, abcB, abcC);
+#endif
 		int textureWide = abcB;
 		if ( bUnderlined )
 		{
@@ -2454,9 +2593,15 @@ void CMatSystemSurface::DrawPrintText(const wchar_t *text, int iTextLen, FontDra
 		{
 			// get the character texture from the cache
 			int iTexId = 0;
+#if defined( PLATFORM_VITA ) && !USE_GETKERNEDCHARWIDTH
+			const float *texCoords = NULL;
+			if ( !VitaGlyphTexture( vitaGlyph, &iTexId, &texCoords ) )
+				continue;
+#else
 			float *texCoords = NULL;
 			if (!g_FontTextureCache.GetTextureForChar(m_hCurrentFont, drawType, ch, &iTexId, &texCoords))
 				continue;
+#endif
 
 			Assert( texCoords );
 

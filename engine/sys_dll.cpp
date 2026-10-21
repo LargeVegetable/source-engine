@@ -343,7 +343,7 @@ bool Sys_MessageBox(const char *title, const char *info, bool bShowOkAndCancel)
 	}
 	return false;
 
-#elif defined( USE_SDL )
+#elif defined( USE_SDL ) && !defined( PLATFORM_VITA )
 
 	int buttonid = 0;
 	SDL_MessageBoxData messageboxdata = { 0 };
@@ -677,6 +677,11 @@ void Sys_InitMemory( void )
 	{
 		memsize = ONE_HUNDRED_TWENTY_EIGHT_MB;
 	}
+#elif defined(PLATFORM_VITA)
+	// no /proc; the engine works within the launcher's newlib heap
+	// (launcher_vita/main.cpp), which is what the budgets derived from this
+	// should reflect
+	memsize = 256 * 1024 * 1024;
 #elif defined(LINUX)
 	const int fd = open("/proc/meminfo", O_RDONLY);
 	if (fd < 0)
