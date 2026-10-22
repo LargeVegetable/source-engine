@@ -4,6 +4,9 @@
 #
 # usage: launcher_vita/build.sh [waf output dir, default build-vita]
 #
+# The game (hl2 or portal) is the one the waf build was configured for; see
+# game.sh.
+#
 # The launcher has to be linked after the modules: its export table is
 # generated from what they import.
 
@@ -27,24 +30,26 @@ if [ -f "$VITAGL_DIR/libvitaGL.a" ]; then
 	echo "using vitaGL from $VITAGL_DIR"
 fi
 
-TITLE_ID=SRCV00001
-TITLE="Half-Life 2"
-# version.h: VITA_PORT_APP_VER is param.sfo's XX.YY version
-APP_VER=$(sed -n 's/^#define VITA_PORT_APP_VER[^"]*"\([^"]*\)".*/\1/p' "$SRC/version.h")
-[ -n "$APP_VER" ] || { echo "no VITA_PORT_APP_VER in version.h" >&2; exit 1; }
+# the game: title ID, names, art (game.sh)
+. "$SRC/game.sh"
+echo "game: $GAME ($TITLE, $TITLE_ID)"
+# version.h: VITA_<GAME>_APP_VER is param.sfo's XX.YY version
+APP_VER=$(sed -n "s/^#define ${VERSION_PREFIX}_APP_VER[^\"]*\"\([^\"]*\)\".*/\1/p" "$SRC/version.h")
+[ -n "$APP_VER" ] || { echo "no ${VERSION_PREFIX}_APP_VER in version.h" >&2; exit 1; }
 
-# HL2_VITA_DEV=1: a testing build. It logs in detail without -vitadebug
-# (VITA_DEV_BUILD in main.cpp) and takes its LiveArea art from sce_sys_dev/,
-# a local, untracked folder for trying other art, when present. Otherwise
-# it's sce_sys/, the release art (in git). package_release.sh refuses
+# HL2_VITA_DEV=1: a testing build (of either game). It logs in detail
+# without -vitadebug (VITA_DEV_BUILD in main.cpp) and takes its LiveArea art
+# from sce_sys_dev/ (sce_sys_portal_dev/ for Portal), a local, untracked
+# folder for trying other art, when present. Otherwise it's sce_sys/
+# (sce_sys_portal/), the release art (in git). package_release.sh refuses
 # testing builds
 DEV_CFLAGS=""
-ART=$SRC/sce_sys
+ART=$SRC/$ART_DIR
 ART_KIND=public
 if [ "${HL2_VITA_DEV:-0}" = 1 ]; then
 	DEV_CFLAGS="-DVITA_DEV_BUILD"
 	ART_KIND=dev
-	[ -d "$SRC/sce_sys_dev" ] && ART=$SRC/sce_sys_dev
+	[ -d "$SRC/${ART_DIR}_dev" ] && ART=$SRC/${ART_DIR}_dev
 fi
 echo "build: $ART_KIND (art $ART)"
 
@@ -61,8 +66,8 @@ python3 "$SRC/check_imports.py" arm-vita-eabi-nm arm-vita-eabi-readelf "$OUT/exp
 
 CFLAGS="-mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb -fno-short-enums -O2 -Wall -I$ROOT/common/vita"
 
-arm-vita-eabi-g++ $CFLAGS $DEV_CFLAGS -std=gnu++11 -c "$SRC/main.cpp" -o "$OUT/main.o"
-arm-vita-eabi-g++ $CFLAGS -std=gnu++11 -c "$SRC/so_loader.cpp" -o "$OUT/so_loader.o"
+arm-vita-eabi-g++ $CFLAGS $GAME_CFLAGS $DEV_CFLAGS -std=gnu++11 -c "$SRC/main.cpp" -o "$OUT/main.o"
+arm-vita-eabi-g++ $CFLAGS $GAME_CFLAGS -std=gnu++11 -c "$SRC/so_loader.cpp" -o "$OUT/so_loader.o"
 arm-vita-eabi-gcc $CFLAGS -c "$SRC/vita_stubs.c" -o "$OUT/vita_stubs.o"
 arm-vita-eabi-gcc $CFLAGS -c "$SRC/vita_iconv.c" -o "$OUT/vita_iconv.o"
 arm-vita-eabi-gcc $CFLAGS -c "$OUT/exports.S" -o "$OUT/exports.o"
@@ -76,7 +81,7 @@ link_launcher() {
 		-Wl,--wrap=sem_destroy -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=memalign \
 		-Wl,--wrap=free -Wl,--wrap=malloc_usable_size -Wl,--wrap=mallinfo -Wl,--wrap=setvbuf \
 		"$OUT/main.o" "$OUT/so_loader.o" "$OUT/vita_stubs.o" "$OUT/vita_iconv.o" "$OUT/exports.o" \
-		-o "$OUT/hl2_vita.elf" $VITAGL_LDFLAGS \
+		-o "$OUT/$NAME.elf" $VITAGL_LDFLAGS \
 		-Wl,--start-group \
 		-lSDL2 -lvitaGL -lvitashark -lSceShaccCgExt -lmathneon \
 		-lfreetype -lpng -ljpeg -lz -lbz2 -lopus \
@@ -95,17 +100,18 @@ link_launcher() {
 # linker packs the two tightly, so the data segment is moved to at least
 # 64 KB past the end of the text in a second link.
 link_launcher
-TEXT_SEG=$(arm-vita-eabi-readelf -lW "$OUT/hl2_vita.elf" | awk '$1 == "LOAD" && / R E / { print $3, $5; exit }')
+TEXT_SEG=$(arm-vita-eabi-readelf -lW "$OUT/$NAME.elf" | awk '$1 == "LOAD" && / R E / { print $3, $5; exit }')
 TEXT_ADDR=${TEXT_SEG% *}
 TEXT_SIZE=${TEXT_SEG#* }
-[ -n "$TEXT_SEG" ] || { echo "no text segment in hl2_vita.elf" >&2; exit 1; }
+[ -n "$TEXT_SEG" ] || { echo "no text segment in $NAME.elf" >&2; exit 1; }
 DATA_START=$(printf "0x%x" $(( ( TEXT_ADDR + TEXT_SIZE + 0x10000 + 0xfff ) & ~0xfff )))
 link_launcher -Wl,--section-start=.init_array=$DATA_START
 
 # -s: no debug info in the eboot (it held the SDK's absolute paths, with the
-# builder's user name); crash logs are read against hl2_vita.elf, which keeps it
-vita-elf-create -s "$OUT/hl2_vita.elf" "$OUT/hl2_vita.velf" > /dev/null
-vita-make-fself -s "$OUT/hl2_vita.velf" "$OUT/eboot.bin"
+# builder's user name); crash logs are read against hl2_vita.elf
+# (portal_vita.elf), which keeps it
+vita-elf-create -s "$OUT/$NAME.elf" "$OUT/$NAME.velf" > /dev/null
+vita-make-fself -s "$OUT/$NAME.velf" "$OUT/eboot.bin"
 
 # ATTRIBUTE2=12 asks for the extended memory budget
 vita-mksfoex -s TITLE_ID=$TITLE_ID -s APP_VER=$APP_VER -d ATTRIBUTE2=12 "$TITLE" "$OUT/param.sfo"
@@ -117,13 +123,13 @@ PACK_ARGS="-a $ART/icon0.png=sce_sys/icon0.png"
 for f in bg.png startup.png; do
 	PACK_ARGS="$PACK_ARGS -a $ART/livearea/contents/$f=sce_sys/livearea/contents/$f"
 done
-PACK_ARGS="$PACK_ARGS -a $SRC/sce_sys/livearea/contents/template.xml=sce_sys/livearea/contents/template.xml"
+PACK_ARGS="$PACK_ARGS -a $SRC/$ART_DIR/livearea/contents/template.xml=sce_sys/livearea/contents/template.xml"
 for so in $MODULES; do
 	name=$(basename "$so")
 	arm-vita-eabi-strip --strip-debug -o "$OUT/bin/$name" "$so"
 	PACK_ARGS="$PACK_ARGS -a $OUT/bin/$name=bin/$name"
 done
 
-vita-pack-vpk -s "$OUT/param.sfo" -b "$OUT/eboot.bin" $PACK_ARGS "$OUT/hl2_vita.vpk"
-echo "$ART_KIND" > "$OUT/hl2_vita.vpk.art"
-ls -l "$OUT/hl2_vita.vpk"
+vita-pack-vpk -s "$OUT/param.sfo" -b "$OUT/eboot.bin" $PACK_ARGS "$OUT/$NAME.vpk"
+echo "$ART_KIND" > "$OUT/$NAME.vpk.art"
+ls -l "$OUT/$NAME.vpk"

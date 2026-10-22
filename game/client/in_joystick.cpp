@@ -107,6 +107,15 @@ static ConVar joy_movement_stick("joy_movement_stick", "0", FCVAR_ARCHIVE | FCVA
 
 static ConVar joy_xcontroller_cfg_loaded( "joy_xcontroller_cfg_loaded", "0", FCVAR_ARCHIVE, "If 0, the 360controller.cfg file will be executed on startup & option changes." );
 
+#ifdef PLATFORM_VITA
+// Gyro aiming (Options > Controls, GitHub issue #3): turning and tilting the
+// Vita turn the view, on top of the right stick
+static ConVar vita_gyro( "vita_gyro", "0", FCVAR_ARCHIVE, "Vita: gyro aiming: turning and tilting the Vita turn the view (Options > Controls)" );
+static ConVar vita_gyro_sensitivity( "vita_gyro_sensitivity", "1.5", FCVAR_ARCHIVE,
+	"Vita: gyro aiming sensitivity: 1 turns the view as far as the Vita turned, 2 twice as far", true, 0.25f, true, 5.0f );
+extern "C" int so_gyro_rates( float *pYaw, float *pPitch );	// launcher: the Vita's turn and tilt rates, rad/s
+#endif
+
 extern ConVar lookspring;
 extern ConVar cl_forwardspeed;
 extern ConVar lookstrafe;
@@ -464,6 +473,13 @@ void CInput::Joystick_Advanced(void)
 		// Xbox always uses a joystick
 		in_joystick.SetValue( 1 );
 	}
+#ifdef PLATFORM_VITA
+	// So does the Vita. A new install's config has joystick 0 (the PC
+	// default), and the input system's switch-on runs before the client has
+	// registered the setting, so the sticks did nothing until the controls
+	// were restored (GitHub issue #4)
+	in_joystick.SetValue( 1 );
+#endif
 
 	// Initialize all the maps
 	for ( i = 0; i < MAX_JOYSTICK_AXES; i++ )
@@ -536,13 +552,18 @@ void CInput::Joystick_Advanced(void)
 		{
 			engine->ClientCmd_Unrestricted( "exec 360controller.cfg" );
 #ifdef PLATFORM_VITA
-			// the port's L/R binds, which 360controller.cfg overwrote
+			// Not 360controller-linux.cfg (the Vita build defines LINUX): it
+			// binds a Linux PC's pad, L jump, R use, circle crouch toggle,
+			// triangle scores and the rear touchpad's right half crouch, and
+			// ran after the port's binds, so a new install started with those
+			// (GitHub issue #1). The port's binds go on top of 360controller.cfg
 			engine->ClientCmd_Unrestricted( "vita_binds" );
-#endif
+#else
 			if ( IsLinux () )
 			{
 				engine->ClientCmd_Unrestricted( "exec 360controller-linux.cfg" );
 			}
+#endif
 			joy_xcontroller_cfg_loaded.SetValue( 2 );
 		}
 	}
@@ -910,6 +931,23 @@ void CInput::JoyStickMove( float frametime, CUserCmd *cmd )
 			KeyUp( &in_joyspeed, NULL );
 		}
 	}
+
+#ifdef PLATFORM_VITA
+	// Gyro aiming: turning the Vita left turns the view left, tilting its top
+	// edge towards you looks up. Scaled by the zoom like the stick
+	if ( vita_gyro.GetBool() )
+	{
+		float flYawRate, flPitchRate;	// radians a second
+		if ( so_gyro_rates( &flYawRate, &flPitchRate ) )
+		{
+			const float flScale = RAD2DEG( 1.0f ) * frametime * vita_gyro_sensitivity.GetFloat() * gHUD.GetFOVSensitivityAdjust();
+			viewangles[YAW] += flYawRate * flScale;
+			viewangles[PITCH] -= flPitchRate * flScale;
+			if ( flPitchRate != 0.0f )
+				view->StopPitchDrift();
+		}
+	}
+#endif
 
 	// Bound pitch
 	viewangles[PITCH] = clamp( viewangles[ PITCH ], -cl_pitchup.GetFloat(), cl_pitchdown.GetFloat() );

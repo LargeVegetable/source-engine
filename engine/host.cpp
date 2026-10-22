@@ -1733,21 +1733,31 @@ CON_COMMAND( vita_screenshot, "Vita: save the next frame to ux0:data/hl2_shot_NN
 // 360 pad: cross A, circle B, square X, triangle Y): R fire, L alt fire
 // (the Vita has no triggers, where the 360 layout puts them), cross jump,
 // square use, triangle flashlight, circle reload, rear touchpad left half
-// crouch (STICK1, see inputsystem/joystick_sdl.cpp). Run at startup and
-// after the client executes 360controller.cfg (once, at the first map load
-// while joy_xcontroller_cfg_loaded < 2), which had put jump and use on L/R.
+// crouch (STICK1, see inputsystem/joystick_sdl.cpp); the touchscreen halves
+// (JOY11, JOY12; common/vita/vita_buttons.h) start unassigned. Run at
+// startup and after the client executes 360controller.cfg (once, at the
+// first map load while joy_xcontroller_cfg_loaded < 2). The rear
+// touchpad's right half (STICK2) sprints; 360controller-linux.cfg, which
+// used to run after these, had put crouch on it (the client no longer runs
+// that file on the Vita). HL2's weapon selection is the console layout
+// (hud_fastswitch 2, the D-pad picks a direction) from the first launch,
+// not only once 360controller.cfg has run.
 // Circle was the debug screenshot (vita_screenshot) in early builds
 #define VITA_DEFAULT_BINDS "bind R_SHOULDER +attack; bind L_SHOULDER +attack2; bind A_BUTTON +jump; bind X_BUTTON +use; " \
-	"bind Y_BUTTON \"impulse 100\"; bind B_BUTTON +reload; bind STICK1 +duck\n"
-CON_COMMAND( vita_binds, "Vita: the port's controller binds (R fire, L alt fire, cross jump, square use, triangle flashlight, circle reload, rear-left touch crouch), then the layout saved from the options menu" )
+	"bind Y_BUTTON \"impulse 100\"; bind B_BUTTON +reload; bind STICK1 +duck; bind STICK2 +speed; unbind JOY11; unbind JOY12; hud_fastswitch 2\n"
+// Portal has no reload or flashlight: circle crouches too (next to cross,
+// for crouch jumps) and triangle starts unassigned
+#define VITA_PORTAL_BINDS "bind R_SHOULDER +attack; bind L_SHOULDER +attack2; bind A_BUTTON +jump; bind X_BUTTON +use; " \
+	"unbind Y_BUTTON; bind B_BUTTON +duck; bind STICK1 +duck; unbind JOY11; unbind JOY12\n"
+CON_COMMAND( vita_binds, "Vita: the port's controller binds (R fire, L alt fire, cross jump, square use, triangle flashlight, circle reload, rear-left touch crouch, rear-right touch sprint; in Portal circle crouches, triangle is unbound), then the layout saved from the options menu" )
 {
 	// Inserted, not appended, so they run before whatever the buffer holds
 	// next (vita_user.cfg at launch). Then the layout saved from the
 	// options menu's Controls tab (GameUI VitaMenu.cpp), if there is one
-	if ( g_pFileSystem->FileExists( "cfg/vita_controls.cfg", "MOD" ) )
-		Cbuf_InsertText( VITA_DEFAULT_BINDS "exec vita_controls.cfg\nvita_binds_fixup\n" );
-	else
-		Cbuf_InsertText( VITA_DEFAULT_BINDS );
+	char szBinds[512];
+	V_snprintf( szBinds, sizeof( szBinds ), "%s%s", !V_stricmp( COM_GetModDirectory(), "portal" ) ? VITA_PORTAL_BINDS : VITA_DEFAULT_BINDS,
+		g_pFileSystem->FileExists( "cfg/vita_controls.cfg", "MOD" ) ? "exec vita_controls.cfg\nvita_binds_fixup\n" : "" );
+	Cbuf_InsertText( szBinds );
 }
 
 // A layout saved by an early build has circle on the debug screenshot
@@ -3042,6 +3052,8 @@ void CheckSpecialCheatVars()
 
 #ifdef PLATFORM_VITA
 extern "C" void so_set_menus_visible( int bVisible );	// launcher
+extern "C" void so_load_mark( const char *what );	// launcher: load checkpoint with shader compiles
+extern "C" void VitaEngineLogTick( void );	// tier0 dbg.cpp: engine.log lines buffered since the last flush
 #endif
 
 void _Host_RunFrame_Render()
@@ -3051,6 +3063,15 @@ void _Host_RunFrame_Render()
 	// menus keep the per-frame dynamic buffer discard; in game the buffers
 	// append across frames (shaderapidx9 meshdx8.cpp, vita_mesh_frame_discard 2)
 	so_set_menus_visible( !cl.IsActive() || scr_drawloading || EngineVGui()->IsGameUIVisible() );
+	VitaEngineLogTick();
+	// the first frame of the main menu (time to the menu, and the shader
+	// compiles it took)
+	static bool s_bVitaMenuMarked = false;
+	if ( !s_bVitaMenuMarked && !cl.IsActive() && !scr_drawloading && EngineVGui()->IsGameUIVisible() )
+	{
+		s_bVitaMenuMarked = true;
+		so_load_mark( "main menu" );
+	}
 	// when a map has finished loading
 	static bool s_bVitaWasLoading = false;
 	const bool bVitaLoading = !cl.IsActive() || scr_drawloading;

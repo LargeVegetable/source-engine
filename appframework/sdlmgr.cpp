@@ -193,6 +193,7 @@ void	CheckGLError( int line )
 
 #ifdef PLATFORM_VITA
 void *VitaGLShimLookup( const char *name ); // vita_glshims.cpp
+extern "C" int so_menus_visible( void );	// launcher: a menu is up
 #endif
 
 void *VoidFnPtrLookup_GlMgr(const char *fn, bool &okay, const bool bRequired, void *fallback)
@@ -1797,6 +1798,14 @@ void CSDLMgr::PumpWindowsMessageLoop()
 				if ( !m_bHasFocus )
 					break;
 
+#ifdef PLATFORM_VITA
+				// The Vita's mouse is the front touchscreen (SDL's touch mouse):
+				// it points in the menus, but in game its halves are buttons
+				// (inputsystem joystick_sdl.cpp), so a swipe doesn't turn the view
+				if ( !so_menus_visible() )
+					break;
+#endif
+
 				// We still handle WM_MOUSEMOVE in CInputSystem for regular mouse events, only raw goes through SDL.
 				// This is done in order to maintain legacy mouse behaviour for Windows users.
 				if ( IsWindows() && !m_bRawInput )
@@ -1840,6 +1849,13 @@ void CSDLMgr::PumpWindowsMessageLoop()
 			case SDL_MOUSEBUTTONUP:
 			case SDL_MOUSEBUTTONDOWN:
 			{
+#ifdef PLATFORM_VITA
+				// In game a tap isn't a click (MOUSE1 fires in HL2's config):
+				// presses are dropped there. Releases always go through, so a
+				// press made in a menu can't stay down
+				if ( event.type == SDL_MOUSEBUTTONDOWN && !so_menus_visible() )
+					break;
+#endif
 				// SDL buttons:
 				//  1 = Left button
 				//  2 = Middle button

@@ -320,6 +320,9 @@ public:
 	virtual void UpdateCustomProgressBar( float progress, const wchar_t *desc );
 	virtual void StartCustomProgress();
 	virtual void FinishCustomProgress();
+#ifdef PLATFORM_VITA
+	virtual void VitaSetLoadingText( const char *pszText );
+#endif
 
 	virtual void EnabledProgressBarForNextLoad()
 	{
@@ -1492,6 +1495,40 @@ void CEngineVGui::UpdateCustomProgressBar( float progress, const wchar_t *desc )
 		V_RenderVGuiOnly();
 	}
 }
+
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// A line of text under the loading bar, at the bar's current position. GameUI
+// shows status text only for multiplayer loads, so it's switched on for the
+// text and back off when it's cleared
+//-----------------------------------------------------------------------------
+void CEngineVGui::VitaSetLoadingText( const char *pszText )
+{
+	if ( !staticGameUIFuncs )
+		return;
+	static bool s_bShown = false, s_bWasShown = false;
+	const bool bText = pszText && pszText[0];
+	if ( bText && !s_bShown )
+	{
+		s_bWasShown = staticGameUIFuncs->SetShowProgressText( true );
+		s_bShown = true;
+	}
+	else if ( !bText && !s_bShown )
+		return;
+	const float flPerc = GetProgressDescription( m_eLastProgressPoint ).nPercent / 100.0f * ( 1.0f - m_ProgressBias ) + m_ProgressBias;
+	const bool bRedraw = staticGameUIFuncs->UpdateProgressBar( flPerc, bText ? pszText : "" );
+	if ( !bText )
+	{
+		staticGameUIFuncs->SetShowProgressText( s_bWasShown );
+		s_bShown = false;
+	}
+	if ( bRedraw )
+	{
+		extern void V_RenderVGuiOnly();
+		V_RenderVGuiOnly();
+	}
+}
+#endif
 
 void CEngineVGui::StartCustomProgress()
 {

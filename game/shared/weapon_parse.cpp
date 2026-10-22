@@ -371,7 +371,16 @@ void FileWeaponInfo_t::Parse( KeyValues *pKeyValuesData, const char *szWeaponNam
 	
 	// Use the console (X360) buckets if hud_fastswitch is set to 2.
 #ifdef CLIENT_DLL
+#ifdef PLATFORM_VITA
+	// Always on the Vita, which uses the console layout. The scripts are
+	// parsed once, as the first map loads, and on a new install that came
+	// before 360controller.cfg first set hud_fastswitch 2: that session got
+	// the PC buckets in the console layout, grenades and the RPG on a
+	// diagonal the D-pad can't select
+	if ( true )
+#else
 	if ( hud_fastswitch.GetInt() == 2 )
+#endif
 #else
 	if ( IsX360() )
 #endif

@@ -71,8 +71,15 @@ int g_nVitaPhysActive;
 // no contact pairs between their pieces; each still collides normally with
 // the world, larger props, NPCs, the player and bullets. Decided when IVP
 // forms a pair (not per frame), and from the entity and its mass, so props
-// restored from saves are covered too
-static ConVar vita_physics_small_props( "vita_physics_small_props", "1", FCVAR_NONE,
+// restored from saves are covered too. Off by default in Portal: it has
+// few props, and its cubes are plain prop_physics that must not pass
+// through each other
+#ifdef PORTAL
+#define VITA_SMALL_PROPS_DEFAULT "0"
+#else
+#define VITA_SMALL_PROPS_DEFAULT "1"
+#endif
+static ConVar vita_physics_small_props( "vita_physics_small_props", VITA_SMALL_PROPS_DEFAULT, FCVAR_NONE,
 	"Vita: small, light physics props (vita_physics_small_mass kg or less) don't collide with each other; 0 = stock. New pairs only (takes full effect on a map load)" );
 static ConVar vita_physics_small_mass( "vita_physics_small_mass", "20", FCVAR_NONE, "Vita: the mass limit (kg) for vita_physics_small_props" );
 

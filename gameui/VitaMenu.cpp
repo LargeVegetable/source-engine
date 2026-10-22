@@ -9,6 +9,7 @@
 #include "BasePanel.h"
 #include "BaseSaveGameDialog.h"
 #include "GameUI_Interface.h"
+#include "ModInfo.h"
 #include "EngineInterface.h"
 
 #include "vgui/IInput.h"
@@ -18,6 +19,7 @@
 #include "vgui_controls/EditablePanel.h"
 #include "vgui_controls/KeyRepeat.h"
 #include "inputsystem/iinputsystem.h"
+#include "vita_buttons.h"
 #include "bitmap/tgaloader.h"
 #include "filesystem.h"
 #include "tier1/convar.h"
@@ -47,6 +49,7 @@ enum
 static HFont s_hVitaFonts[VITA_FONT_COUNT];
 
 extern "C" const char *so_port_version( void );	// launcher: "v0.1.0-beta"
+extern "C" void so_set_touch_capture( int bCapture );	// launcher: touchscreen halves act while assigning
 static int s_nVitaFontsTall = -1;
 
 // Scales a size given for 368 lines (the 640x368 render) to the screen
@@ -139,6 +142,7 @@ enum VitaGlyph_t
 	VG_SELECT,
 	VG_DPAD,
 	VG_REAR,
+	VG_SCREEN,
 };
 
 static const char *VitaGlyphLabel( int nGlyph )
@@ -152,6 +156,7 @@ static const char *VitaGlyphLabel( int nGlyph )
 	case VG_SELECT:	return "SELECT";
 	case VG_DPAD:	return "D-PAD";
 	case VG_REAR:	return "REAR";
+	case VG_SCREEN:	return "SCREEN";
 	default:		return NULL;
 	}
 }
@@ -1073,6 +1078,7 @@ private:
 
 //-----------------------------------------------------------------------------
 // New game: the unlocked chapters, with the difficulty on the first row
+// (none in games without one, nodifficulty in gameinfo.txt: Portal)
 //-----------------------------------------------------------------------------
 struct VitaChapter_t
 {
@@ -1098,8 +1104,11 @@ class CVitaNewGameScreen : public CVitaScreen
 public:
 	CVitaNewGameScreen( Panel *pParent ) : BaseClass( pParent, "VitaNewGame", "NEW GAME" )
 	{
+		// without a difficulty setting the game runs at skill 1, as on PC
+		// (where nothing changes it) and the Xbox 360
+		m_bDifficulty = !ModInfo().NoDifficulty();
 		ConVarRef skill( "skill" );
-		m_nSkill = clamp( skill.IsValid() ? skill.GetInt() : 2, 1, 3 );
+		m_nSkill = m_bDifficulty ? clamp( skill.IsValid() ? skill.GetInt() : 2, 1, 3 ) : 1;
 		m_nImageTexture = -1;
 		m_nImageFor = -2;
 		ScanChapters();
@@ -1117,6 +1126,7 @@ protected:
 	virtual void Refresh()
 	{
 		m_Rows.RemoveAll();
+		if ( m_bDifficulty )
 		{
 			VitaRow_t &row = m_Rows[m_Rows.AddToTail()];
 			row.m_Label = "Difficulty";
@@ -1140,21 +1150,24 @@ protected:
 		}
 		m_Hints.RemoveAll();
 		const VitaHint_t hints[] = { { VG_DPAD, "Difficulty" }, { VG_CROSS, "Start" }, { VG_CIRCLE, "Back" } };
-		m_Hints.AddMultipleToTail( 3, hints );
+		if ( m_bDifficulty )
+			m_Hints.AddMultipleToTail( 3, hints );
+		else
+			m_Hints.AddMultipleToTail( 2, hints + 1 );
 	}
 
 	// the first chapter, as on the consoles (the difficulty is row 0)
-	virtual int InitialRow() const { return m_Rows.Count() > 1 ? 1 : 0; }
+	virtual int InitialRow() const { return m_Rows.Count() > FirstChapterRow() ? FirstChapterRow() : 0; }
 
 	virtual void OnAdjustRow( int nRow, int nDir )
 	{
-		if ( nRow == 0 )
+		if ( m_bDifficulty && nRow == 0 )
 			ChangeSkill( nDir );
 	}
 
 	virtual void OnActivateRow( int nRow )
 	{
-		if ( nRow == 0 )
+		if ( m_bDifficulty && nRow == 0 )
 		{
 			ChangeSkill( 1 );
 			return;
@@ -1175,8 +1188,8 @@ protected:
 
 	virtual void PaintDetail( int x, int y, int wide, int tall )
 	{
-		const int nChapter = m_nSel > 0 ? m_nSel - 1 : 0;
-		if ( !m_Chapters.IsValidIndex( nChapter ) || !m_Rows.IsValidIndex( nChapter + 1 ) || !m_Rows[nChapter + 1].m_bEnabled )
+		const int nChapter = MAX( m_nSel - FirstChapterRow(), 0 );
+		if ( !m_Chapters.IsValidIndex( nChapter ) || !m_Rows.IsValidIndex( nChapter + FirstChapterRow() ) || !m_Rows[nChapter + FirstChapterRow()].m_bEnabled )
 			return;
 		if ( m_nImageFor != nChapter )
 		{
@@ -1200,13 +1213,17 @@ protected:
 		surface()->DrawOutlinedRect( x - 1, y - 1, x + dw + 1, y + dt + 1 );
 
 		HFont item = VitaFont( VITA_FONT_ITEM );
-		VitaDrawText( item, x, y + dt + VS( 10 ), m_Rows[nChapter + 1].m_Label.Get(), Color( 255, 255, 255, 255 ) );
+		VitaDrawText( item, x, y + dt + VS( 10 ), m_Rows[nChapter + FirstChapterRow()].m_Label.Get(), Color( 255, 255, 255, 255 ) );
+		if ( !m_bDifficulty )
+			return;
 		char szSkill[64];
 		V_snprintf( szSkill, sizeof( szSkill ), "Difficulty: %s", s_pszVitaSkills[m_nSkill - 1] );
 		VitaDrawText( VitaFont( VITA_FONT_SMALL ), x, y + dt + VS( 14 ) + surface()->GetFontTall( item ), szSkill, Color( 200, 200, 200, 255 ) );
 	}
 
 private:
+	int FirstChapterRow() const { return m_bDifficulty ? 1 : 0; }
+
 	void ChangeSkill( int nDir )
 	{
 		m_nSkill = clamp( m_nSkill + nDir, 1, 3 );
@@ -1215,7 +1232,7 @@ private:
 
 	void Start()
 	{
-		const int nChapter = m_nSel - 1;
+		const int nChapter = m_nSel - FirstChapterRow();
 		if ( !m_Chapters.IsValidIndex( nChapter ) )
 			return;
 		ConVarRef commentary( "commentary" );
@@ -1260,6 +1277,7 @@ private:
 	}
 
 	CUtlVector< VitaChapter_t > m_Chapters;
+	bool m_bDifficulty;
 	int m_nSkill;
 	int m_nImageTexture;
 	int m_nImageFor;
@@ -1319,6 +1337,9 @@ static const VitaOption_t s_VitaOptions[] =
 	{ TAB_CONTROLS, OPT_BIND, "Quick load", "load quick" },
 	{ TAB_CONTROLS, OPT_LOOK, "Look sensitivity" },
 	{ TAB_CONTROLS, OPT_CHOICE, "Invert look", "joy_inverty", "0:Off|1:On" },
+	// gyro aiming (client in_joystick.cpp; GitHub issue #3)
+	{ TAB_CONTROLS, OPT_CHOICE, "Gyro aiming", "vita_gyro", "0:Off|1:On" },
+	{ TAB_CONTROLS, OPT_SLIDER, "Gyro sensitivity", "vita_gyro_sensitivity", NULL, 0.5f, 3.0f, 0.25f },
 	{ TAB_CONTROLS, OPT_RESET, "Restore default controls" },
 	{ TAB_GAME, OPT_CHOICE, "Difficulty", "skill", "1:Easy|2:Normal|3:Hard" },
 	{ TAB_GAME, OPT_CAPTIONS, "Subtitles" },
@@ -1333,13 +1354,42 @@ static const VitaOption_t s_VitaOptions[] =
 	{ TAB_VIDEO, OPT_CHOICE, "Fire smoke", "vita_fire_smoke", "0:Off|1:On" },	// client c_fire_smoke.cpp
 };
 
+// Portal's controls are the ones in its keyboard list (scripts/kb_act.lst):
+// the portal gun's two portals are named, and HL2's weapon and suit
+// actions are left out. Games without a difficulty setting (nodifficulty
+// in gameinfo.txt) have no Difficulty row
+static const char *VitaOptionLabel( const VitaOption_t &opt )
+{
+	if ( opt.m_nType == OPT_BIND && !V_stricmp( COM_GetModDirectory(), "portal" ) )
+	{
+		if ( !V_strcmp( opt.m_pszCvar, "+attack" ) )
+			return "Blue portal";
+		if ( !V_strcmp( opt.m_pszCvar, "+attack2" ) )
+			return "Orange portal";
+	}
+	return opt.m_pszLabel;
+}
+
+static bool VitaOptionShown( const VitaOption_t &opt )
+{
+	if ( opt.m_nType == OPT_CHOICE && !V_strcmp( opt.m_pszCvar, "skill" ) )
+		return !ModInfo().NoDifficulty();
+	if ( opt.m_nType != OPT_BIND || V_stricmp( COM_GetModDirectory(), "portal" ) )
+		return true;
+	static const char *s_pszNotInPortal[] = { "+reload", "+speed", "impulse 100", "+zoom", "invnext", "invprev", "lastinv", "phys_swap" };
+	for ( int i = 0; i < ARRAYSIZE( s_pszNotInPortal ); i++ )
+		if ( !V_strcmp( opt.m_pszCvar, s_pszNotInPortal[i] ) )
+			return false;
+	return true;
+}
+
 // Saved to cfg/vita_settings.cfg, which runs after the built-in Vita settings
 // at launch (engine/host.cpp)
 static const char *s_pszVitaSavedCvars[] =
 {
 	"skill", "closecaption", "cc_subtitles", "crosshair", "volume", "snd_musicvolume", "cl_showfps",
 	"r_flex", "r_vita_flex_dist", "joy_yawsensitivity", "joy_pitchsensitivity", "joy_inverty",
-	"vita_staticprop_minpixels", "vita_hud_size", "vita_fire_smoke",
+	"vita_staticprop_minpixels", "vita_hud_size", "vita_fire_smoke", "vita_gyro", "vita_gyro_sensitivity",
 };
 
 // The remappable buttons (START stays the menu button)
@@ -1349,6 +1399,7 @@ static const ButtonCode_t s_VitaButtons[] =
 	KEY_XBUTTON_LEFT_SHOULDER, KEY_XBUTTON_RIGHT_SHOULDER, KEY_XBUTTON_BACK,
 	KEY_XBUTTON_UP, KEY_XBUTTON_DOWN, KEY_XBUTTON_LEFT, KEY_XBUTTON_RIGHT,
 	KEY_XBUTTON_STICK1, KEY_XBUTTON_STICK2,
+	VITA_FRONT_TOUCH_LEFT, VITA_FRONT_TOUCH_RIGHT,
 };
 
 static int VitaButtonGlyph( ButtonCode_t code )
@@ -1368,11 +1419,13 @@ static int VitaButtonGlyph( ButtonCode_t code )
 	case KEY_XBUTTON_RIGHT:				return VG_DPAD;
 	case KEY_XBUTTON_STICK1:
 	case KEY_XBUTTON_STICK2:			return VG_REAR;
+	case VITA_FRONT_TOUCH_LEFT:
+	case VITA_FRONT_TOUCH_RIGHT:		return VG_SCREEN;
 	default:							return VG_NONE;
 	}
 }
 
-// What follows the symbol (the d-pad and rear touch have one symbol each)
+// What follows the symbol (the d-pad and each touch panel have one symbol)
 static const char *VitaButtonSuffix( ButtonCode_t code )
 {
 	switch ( code )
@@ -1383,6 +1436,8 @@ static const char *VitaButtonSuffix( ButtonCode_t code )
 	case KEY_XBUTTON_RIGHT:		return "Right";
 	case KEY_XBUTTON_STICK1:	return "Left";
 	case KEY_XBUTTON_STICK2:	return "Right";
+	case VITA_FRONT_TOUCH_LEFT:		return "Left";
+	case VITA_FRONT_TOUCH_RIGHT:	return "Right";
 	default:					return "";
 	}
 }
@@ -1418,6 +1473,11 @@ public:
 		m_bControlsChanged = false;
 	}
 
+	virtual ~CVitaOptionsScreen()
+	{
+		so_set_touch_capture( 0 );
+	}
+
 	virtual void Close()
 	{
 		SaveSettings();
@@ -1436,11 +1496,11 @@ protected:
 		for ( int i = 0; i < ARRAYSIZE( s_VitaOptions ); i++ )
 		{
 			const VitaOption_t &opt = s_VitaOptions[i];
-			if ( opt.m_nTab != m_nTab )
+			if ( opt.m_nTab != m_nTab || !VitaOptionShown( opt ) )
 				continue;
 			VitaRow_t &row = m_Rows[m_Rows.AddToTail()];
 			m_RowOption.AddToTail( i );
-			row.m_Label = opt.m_pszLabel;
+			row.m_Label = VitaOptionLabel( opt );
 			FillValue( opt, row, m_Rows.Count() - 1 );
 		}
 		UpdateHints();
@@ -1471,7 +1531,7 @@ protected:
 		{
 			if ( nRow == m_nCapture )
 			{
-				row.m_Value = "Press a button...";
+				row.m_Value = "Press a button or tap the screen...";
 				break;
 			}
 			// the first remappable button that runs it, and how many more
@@ -1685,6 +1745,7 @@ protected:
 		case OPT_BIND:
 			m_nCapture = nRow;
 			m_flCaptureEnd = Plat_FloatTime() + 6.0f;
+			so_set_touch_capture( 1 );
 			FillValue( opt, m_Rows[nRow], nRow );
 			UpdateHints();
 			break;
@@ -1743,6 +1804,7 @@ protected:
 	{
 		const int nRow = m_nCapture;
 		m_nCapture = -1;
+		so_set_touch_capture( 0 );
 		if ( m_RowOption.IsValidIndex( nRow ) )
 			FillValue( s_VitaOptions[m_RowOption[nRow]], m_Rows[nRow], nRow );
 		// other rows may have lost their button to this one
@@ -1781,6 +1843,15 @@ protected:
 		if ( m_nCapture >= 0 && Plat_FloatTime() > m_flCaptureEnd )
 			EndCapture();
 		BaseClass::OnThink();
+	}
+
+	// While waiting for a button, a tap is a touchscreen half being assigned
+	// (inputsystem posts it as a button), not a tap on a row
+	virtual void OnMousePressed( MouseCode code )
+	{
+		if ( m_nCapture >= 0 )
+			return;
+		BaseClass::OnMousePressed( code );
 	}
 
 	virtual void OnBack()
@@ -1912,7 +1983,7 @@ protected:
 		m_RowAction.RemoveAll();
 		if ( GameUI().IsInLevel() )
 			AddRow( "Return to the main menu", ROW_MAINMENU );
-		AddRow( "Quit Half-Life 2", ROW_QUIT );
+		AddRow( !V_stricmp( COM_GetModDirectory(), "portal" ) ? "Quit Portal" : "Quit Half-Life 2", ROW_QUIT );
 		AddRow( "Cancel", ROW_CANCEL );
 		m_Hints.RemoveAll();
 		const VitaHint_t hints[] = { { VG_CROSS, "Select" }, { VG_CIRCLE, "Back" } };

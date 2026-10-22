@@ -28,6 +28,10 @@
 #include "view.h"
 #include "ixboxsystem.h"
 
+#ifdef PLATFORM_VITA
+#include "vita_buttons.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 																						
@@ -895,7 +899,7 @@ const char * UTIL_SafeName( const char *oldName )
 #ifdef PLATFORM_VITA
 //-----------------------------------------------------------------------------
 // The Vita button bound to a command, as hints show it: the PlayStation
-// shapes, L/R, the D-pad's arrows, START/SELECT and the rear touchpad halves
+// shapes, L/R, the D-pad's arrows, START/SELECT and the touch panels' halves
 // (SDL names the face buttons like a 360 pad's: cross A, circle B, square X,
 // triangle Y). Looked up before keyboard keys, which HL2's default config
 // also binds and Key_LookupBinding would find first. NULL if no button is
@@ -909,6 +913,7 @@ const wchar_t *UTIL_VitaButtonForBinding( const char *pszBinding )
 		{ KEY_XBUTTON_UP, L"\u2191" }, { KEY_XBUTTON_DOWN, L"\u2193" }, { KEY_XBUTTON_LEFT, L"\u2190" }, { KEY_XBUTTON_RIGHT, L"\u2192" },
 		{ KEY_XBUTTON_START, L"START" }, { KEY_XBUTTON_BACK, L"SELECT" },
 		{ KEY_XBUTTON_STICK1, L"REAR TOUCH LEFT" }, { KEY_XBUTTON_STICK2, L"REAR TOUCH RIGHT" },
+		{ VITA_FRONT_TOUCH_LEFT, L"TOUCHSCREEN LEFT" }, { VITA_FRONT_TOUCH_RIGHT, L"TOUCHSCREEN RIGHT" },
 	};
 	if ( !pszBinding || !pszBinding[0] )
 		return NULL;

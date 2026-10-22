@@ -71,8 +71,7 @@ See VitaShell's own instructions for the buttons.
 
 ## 6. Play
 
-- The first launch takes a little longer: the game writes its default settings.
-- The first time you enter each area, its shaders compile and you may see short pauses. They're cached in `ux0:data/shader_cache/`, so it only happens once.
+- **Expect hitches the first time you see new things:** the game compiles each shader on the Vita the first time it's drawn, and in the first minutes that can freeze the picture for several seconds. It isn't a crash; let it carry on. The compiled shaders are kept in `ux0:data/shader_cache/`, so it only happens once.
 - Your saves are in `ux0:data/halflife2/hl2/save/` and your settings in `ux0:data/halflife2/hl2/cfg/`.
 - Controls and settings: see [README_VITA.md](README_VITA.md).
 

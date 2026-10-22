@@ -4,7 +4,7 @@ An unofficial port of the Source engine to the PlayStation Vita that runs **Half
 
 **No game files are included.** You need Half-Life 2 on Steam and you copy its files to your Vita yourself: see **[INSTALL_VITA.md](INSTALL_VITA.md)**.
 
-**Version 0.1.0-beta.** [Download it from the releases page](../../releases/latest).
+**Version 0.1.1-beta.** [Download it from the releases page](../../releases/latest).
 
 ## Status
 
@@ -16,12 +16,13 @@ An unofficial port of the Source engine to the PlayStation Vita that runs **Half
 ## Features
 
 - Menus made for the Vita: new game by chapter, save and load with screenshots, and options in tabs for controls, game, audio and video. Use the buttons or tap.
-- Every action can be remapped, including to the D-pad, SELECT and both halves of the rear touchpad. Look sensitivity and invert look too.
+- Every action can be remapped, including to the D-pad, SELECT, and the left and right halves of both the rear touchpad and the touchscreen. Look sensitivity and invert look too.
 - Facial animation and lip sync, with a distance setting for performance.
 - A larger HUD (three sizes) and PlayStation button symbols in on-screen hints.
 - Video options for the heavy effects: distant small props, and the smoke above fires.
 - If something is missing at launch (kubridge, the shader compiler, the game files, or game files from the wrong Steam build), a message says what and how to fix it.
-- Rear touchpad crouch.
+- Rear touchpad crouch (left half) and sprint (right half).
+- Optional gyro aiming: turn and tilt the Vita to aim, on top of the right stick, with a sensitivity setting (Options > Controls).
 - Closing the game from LiveArea or quitting from the menu goes straight back to the home screen.
 
 ## Requirements
@@ -47,11 +48,17 @@ Step by step: **[INSTALL_VITA.md](INSTALL_VITA.md)**.
 | ○ | Reload |
 | △ | Flashlight |
 | Rear touchpad, left half | Crouch |
+| Rear touchpad, right half | Sprint |
+| Touchscreen, left or right half | Unassigned: pick actions in Options > Controls |
 | START | Menu |
 
-The rest (switching weapons, sprint, zoom, gravity gun, quick save and quick load) is listed in **Options > Controls**. To move an action to another button, select it with ✕ and press the new button.
+The rest (switching weapons, zoom, gravity gun, quick save and quick load) is listed in **Options > Controls**. To move an action to another button, select it with ✕, then press the new button or tap a half of the touchscreen.
 
-On a PS TV there's no rear touchpad, so move Crouch to another button in Options > Controls.
+The touchscreen halves work as buttons only in game; in the menus you tap as usual.
+
+**Gyro aiming** is off by default: turn it on in Options > Controls. Turning the Vita left or right turns the view, and tilting it looks up or down, on top of the right stick. At sensitivity 1 the view turns as far as the Vita does.
+
+On a PS TV there's no rear touchpad, touchscreen or gyro, so move Crouch to another button in Options > Controls.
 
 In the menus: D-pad or left stick to move, ✕ to select, ○ to go back, L and R to switch tabs, △ to delete a save.
 
@@ -64,7 +71,7 @@ The Options menu covers the usual settings. Two files cover the rest:
 
 ## Performance notes
 
-- The first time you visit an area, its shaders are compiled on the Vita, so you may see short pauses. They're kept in `ux0:data/shader_cache/`, so later visits don't pause.
+- **The first time something is drawn, the game briefly hitches:** it compiles that shader on the Vita, which takes about half a second to a second each. Early on, and in each new area, that can add up to pauses of several seconds. The compiled shaders are kept in `ux0:data/shader_cache/`, so it only happens once.
 - Physics-heavy moments (many objects tumbling at once) can still hitch briefly.
 
 ## Known issues
@@ -84,11 +91,16 @@ For more detailed logs, add `-vitadebug` to `ux0:data/halflife2/commandline.txt`
 
 For anything else, please include:
 
+- your firmware version and how it's hacked (HENkaku, Ensō, h-encore), and the model (PS Vita 1000 or 2000, PS TV);
+- where the game is installed (Sony memory card, SD2Vita and the card's brand, or internal storage), and any other plugins you run, especially overclocking or memory ones;
+- whether it was the first launch, and how long you waited;
 - `ux0:data/hl2_vita_boot.txt`, the log of the last session (`hl2_vita_boot.1.txt` to `.4.txt` are the sessions before it);
-- `ux0:data/halflife2/engine.log`;
+- `ux0:data/halflife2/engine.log` (`engine.1.log` to `.4.log` are the sessions before it);
 - `ux0:data/halflife2/crash.log`, if there is one;
 - where you were in the game and what happened;
 - the version, shown at the top right of the menus.
+
+Copy the logs before launching the game again more than four times: only the last five sessions are kept.
 
 ## Building from source
 

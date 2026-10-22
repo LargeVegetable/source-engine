@@ -42,6 +42,14 @@ void so_exit_process( int code );
 void so_set_gl_ready( void );	// vitaGL is up (glFinish is safe)
 void so_set_menus_visible( int bVisible );	// engine, each frame
 int so_menus_visible( void );	// shaderapidx9: per-frame dynamic buffer discard
+int so_gyro_rates( float *pYaw, float *pPitch );	// client gyro aiming: rad/s, 0 if unavailable
+// Load checkpoints (engine, GameUI): the time, and the shader compiles and
+// their seconds since the previous checkpoint
+void so_load_mark( const char *what );
+void so_shader_compiles( uint64_t *pCalls, uint64_t *pMicroseconds );	// totals so far
+void so_perf_read( int counter, uint64_t *pCalls, uint64_t *pMicroseconds );	// any VITA_PERF_* counter
+void so_file_open_note( const char *path );	// filesystem_stdio: a file opened (long-frame line)
+void so_file_notes_take( char *pszOut, int nOutSize );	// main.cpp: opens since the last call, by type
 float so_hud_scale( void );	// HUD size: vgui2 Scheme.cpp, client vita_hud_size
 void so_set_hud_scale( float flScale );
 void so_reserve_register( const void *pStack, void *pCaller );	// tier1/memstack.cpp

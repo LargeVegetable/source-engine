@@ -606,6 +606,47 @@ void CHudWeaponSelection::Paint()
 			int xModifiers[] = { 0, 1, 0, -1, -1, 1 };
 			int yModifiers[] = { -1, 0, 1, 0, 1, 1 };
 
+#ifdef PLATFORM_VITA
+			// The layout is centred on the crosshair, which autoaim
+			// (sk_autoaim_mode 2, from 360controller.cfg) pulls towards
+			// targets: on the 640x368 screen the outer boxes could land off it,
+			// out of reach. The centre is moved so every bucket in use stays on
+			// screen, in this panel's coordinates (the panel doesn't start at
+			// the screen's corner, and the boxes are drawn relative to it)
+			{
+				int nPanelX, nPanelY, nPanelWide, nPanelTall;
+				GetBounds( nPanelX, nPanelY, nPanelWide, nPanelTall );
+				screenCenterX -= nPanelX;
+				screenCenterY -= nPanelY;
+				const int nBoxWide = m_flMediumBoxWide, nBoxTall = m_flMediumBoxTall;
+				int nLeft = nBoxWide / 2, nRight = nBoxWide / 2, nUp = nBoxTall / 2, nDown = nBoxTall / 2;
+				for ( int i = 0; i < MAX_WEAPON_SLOTS; ++i )
+				{
+					int nBoxes = 0;	// boxes drawn out from the centre: up to the last weapon
+					for ( int slotPos = 0; slotPos < MAX_WEAPON_POSITIONS; ++slotPos )
+					{
+						if ( GetWeaponInSlot( i, slotPos ) )
+							nBoxes = slotPos + 1;
+					}
+					const int nOutX = nBoxWide / 2 + nBoxes * ( nBoxWide + 5 );
+					const int nOutY = nBoxTall / 2 + nBoxes * ( nBoxTall + 5 );
+					if ( xModifiers[i] < 0 ) nLeft = MAX( nLeft, nOutX );
+					if ( xModifiers[i] > 0 ) nRight = MAX( nRight, nOutX );
+					if ( yModifiers[i] < 0 ) nUp = MAX( nUp, nOutY );
+					if ( yModifiers[i] > 0 ) nDown = MAX( nDown, nOutY );
+				}
+				const int nMargin = 4;
+				if ( nLeft + nRight + 2 * nMargin <= nPanelWide )
+					screenCenterX = clamp( screenCenterX, nLeft + nMargin, nPanelWide - nRight - nMargin );
+				else
+					screenCenterX = ( nPanelWide + nLeft - nRight ) / 2;
+				if ( nUp + nDown + 2 * nMargin <= nPanelTall )
+					screenCenterY = clamp( screenCenterY, nUp + nMargin, nPanelTall - nDown - nMargin );
+				else
+					screenCenterY = ( nPanelTall + nUp - nDown ) / 2;
+			}
+#endif
+
 			// Draw the four buckets
 			for ( int i = 0; i < MAX_WEAPON_SLOTS; ++i )
 			{

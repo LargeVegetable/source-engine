@@ -107,6 +107,10 @@ public:
 	virtual void UpdateCustomProgressBar( float progress, const wchar_t *desc ) = 0;
 	virtual void StartCustomProgress() = 0;
 	virtual void FinishCustomProgress() = 0;
+#ifdef PLATFORM_VITA
+	// a line of text on the loading screen, redrawn at once; NULL or "" clears it
+	virtual void VitaSetLoadingText( const char *pszText ) = 0;
+#endif
 	virtual void ShowErrorMessage() = 0;
 
 	// Should pause?

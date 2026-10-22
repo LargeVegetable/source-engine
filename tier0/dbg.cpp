@@ -68,6 +68,10 @@ public:
 	void Init(const char *logfile);
 	void Write(const char *data);
 	void Disable();
+#ifdef PLATFORM_VITA
+	void VitaFlush();
+	void VitaFlushIfDue();
+#endif
 
 private:
 	FILE *file;
@@ -76,6 +80,10 @@ private:
 
 	char *pMsgs[MAX_MSGS];
 	size_t iMsg;
+#ifdef PLATFORM_VITA
+	bool m_bVitaUnflushed;
+	double m_flVitaLastFlush;
+#endif
 };
 
 
@@ -85,6 +93,10 @@ CDbgLogger::CDbgLogger()
 	flStartTime = Plat_FloatTime();
 	file = NULL;
 	iMsg = 0;
+#ifdef PLATFORM_VITA
+	m_bVitaUnflushed = false;
+	m_flVitaLastFlush = 0.0;
+#endif
 }
 
 void CDbgLogger::Disable()
@@ -171,7 +183,18 @@ void CDbgLogger::Write(const char *data)
 	{
 		fprintf(file, "[%.4f] ", Plat_FloatTime() - flStartTime);
 		fprintf(file, "%s", data);
+#ifdef PLATFORM_VITA
+		// Flushed at most every quarter second, not per line: each flush is
+		// a write to the memory card (~22 ms a line measured), and a level
+		// start printed dozens of lines in its first frame. The engine's
+		// frame calls VitaEngineLogTick for what's left; a crash loses at
+		// most the last quarter second of this log (crash.log and the boot
+		// log are separate)
+		m_bVitaUnflushed = true;
+		VitaFlushIfDue();
+#else
 		fflush(file);
+#endif
 	}
 	else if( iMsg < MAX_MSGS )
 	{
@@ -184,6 +207,37 @@ void CDbgLogger::Write(const char *data)
 
 static CDbgLogger g_DbgLogger;
 IDbgLogger *DebugLogger() { return &g_DbgLogger; }
+
+#ifdef PLATFORM_VITA
+void CDbgLogger::VitaFlush()
+{
+	if ( !file || !m_bVitaUnflushed )
+		return;
+	fflush( file );
+	m_bVitaUnflushed = false;
+	m_flVitaLastFlush = Plat_FloatTime();
+}
+
+void CDbgLogger::VitaFlushIfDue()
+{
+	if ( m_bVitaUnflushed && Plat_FloatTime() - m_flVitaLastFlush >= 0.25 )
+		VitaFlush();
+}
+
+// engine/host.cpp, each frame: writes out engine.log lines buffered since
+// the last flush
+extern "C" DLL_EXPORT void VitaEngineLogTick( void )
+{
+	g_DbgLogger.VitaFlushIfDue();
+}
+
+// launcher so_exit_process: everything, before the process ends (the
+// logger's destructor never runs on the Vita)
+extern "C" DLL_EXPORT void VitaEngineLogFlush( void )
+{
+	g_DbgLogger.VitaFlush();
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // internal structures

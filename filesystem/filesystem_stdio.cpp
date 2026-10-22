@@ -665,9 +665,16 @@ void CFileSystem_Stdio::FreeOptimalReadBuffer( void *p )
 //-----------------------------------------------------------------------------
 // Purpose: low-level filesystem wrapper
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+extern "C" void so_file_open_note( const char *path );	// launcher: opens by type for the long-frame line
+#endif
+
 FILE *CFileSystem_Stdio::FS_fopen( const char *filenameT, const char *options, unsigned flags, int64 *size )
 {
 	VITA_PERF_SCOPE( VITA_PERF_FILE_OPEN );
+#ifdef PLATFORM_VITA
+	so_file_open_note( filenameT );
+#endif
 	CStdFilesystemFile *pFile = NULL;
 
 	char filename[ MAX_PATH ];

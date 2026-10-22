@@ -40,5 +40,6 @@ source-engine.sln
 
 # Vita: LiveArea art that can't be published (launcher_vita/build.sh, HL2_VITA_DEV_ART=1)
 launcher_vita/sce_sys_dev/
+launcher_vita/sce_sys_portal_dev/
 # Vita: release packages (launcher_vita/package_release.sh)
 dist/

@@ -223,6 +223,12 @@ void CPortalRender::LevelInitPreEntity()
 	m_Materials.m_Wireframe.Init( "shadertest/wireframe", TEXTURE_GROUP_CLIENT_EFFECTS );
 	m_Materials.m_WriteZ_Model.Init( "engine/writez_model", TEXTURE_GROUP_CLIENT_EFFECTS );
 	m_Materials.m_TranslucentVertexColor.Init( "engine/TranslucentVertexColor", TEXTURE_GROUP_CLIENT_EFFECTS );
+
+#ifdef PLATFORM_VITA
+	// stencil views need stencil bits; without them portals render to textures
+	Msg( "[vita] portal views: %s, stencil bits %d, r_portal_stencil_depth %d\n",
+		ShouldUseStencilsToRenderPortals() ? "stencil" : "texture", materials->StencilBufferBits(), r_portal_stencil_depth.GetInt() );
+#endif
 }
 
 void CPortalRender::LevelShutdownPreEntity()

@@ -166,10 +166,12 @@ static FILE *GetDebugFileHandle( void )
 
 #ifdef PLATFORM_VITA
 	// Off on the Vita: the boot preload replayed every pair saved by every
-	// earlier session (107 pairs, 15.7 s at boot, 920 of vitaGL's 2048 shader
-	// slots used before the first map), and the saved table only grows.
-	// Shaders are created at map load instead (vitaGL's disk cache keeps the
-	// compiled code, so that's a cache read)
+	// earlier session (107 pairs, 15.7 s at boot, 920 shaders before the first
+	// map; vitaGL had 2048 slots then, 4096 now), and the saved table only
+	// grows. Shaders are created at map load instead: every variant of each
+	// material's shaders, 4-7 times the pairs drawn. With a warm shader cache
+	// (vitaGL's, on disk) each is a cache read; on a cold one, a compile on
+	// the Vita. -shadersondemand creates them at first draw instead
 	ConVar mat_autosave_glshaders( "mat_autosave_glshaders", "0" );
 	ConVar mat_autoload_glshaders( "mat_autoload_glshaders", "0" );
 #else

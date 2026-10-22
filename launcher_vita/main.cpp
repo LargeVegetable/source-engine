@@ -3,8 +3,9 @@
 // Purpose: PS Vita launcher. Replaces launcher_main: sets up the process,
 //          loads liblauncher.so through the module loader and runs it.
 //
-//          Game data is expected under VITA_BASE_DIR (hl2/, platform/, ...
-//          copied from a PC install); engine modules ship in app0:bin.
+//          Game data is expected under VITA_BASE_DIR (game.h: hl2/,
+//          platform/, ... copied from a PC install); engine modules ship
+//          in app0:bin.
 //
 //=============================================================================//
 #include <stdarg.h>
@@ -30,7 +31,7 @@
 #include <kubridge.h>
 
 #include "so_loader.h"
-#include "version.h"
+#include "game.h"
 
 // -vitadebug in commandline.txt: the detailed logs (10 s performance and
 // memory lines, saved frames, heap checks at map changes, slow server
@@ -41,7 +42,6 @@ static bool s_bVitaDebug = false;
 static bool s_bGLUp = false;	// vitaGL is initialized (the engine's or the error dialog's)
 
 
-#define VITA_BASE_DIR "ux0:data/halflife2"
 #define VITA_MAX_ARGS 64
 
 // The engine and game code allocate from the newlib heap; what's left over
@@ -314,7 +314,7 @@ static volatile int s_bScreenshotRequested = 0;
 
 
 // vita_screenshot (engine): the next presented frame is saved as
-// ux0:data/hl2_shot_NN.tga
+// ux0:data/hl2_shot_NN.tga (VITA_FILE_PREFIX, game.h)
 extern "C" void so_request_screenshot( void )
 {
 	s_bScreenshotRequested = 1;
@@ -326,6 +326,46 @@ extern "C" void __wrap_vglSwapBuffers( unsigned char has_commondialog )
 	static int s_nSwaps = 0, s_nSwapsAtLog = 0;
 	static SceUInt64 s_nLastLog = 0;
 	const SceUInt64 now = sceKernelGetProcessTimeWide();
+
+	// In game, a frame over 100 ms that compiled shaders (on-demand creation,
+	// cold cache) or took over 500 ms anyway (the first frame of a level):
+	// what it spent on shader compiles, texture uploads and file I/O (and
+	// which files), and the engine's frame parts. At most 100 lines a session
+	{
+		// VITA_PERF_*: shader compile, tex upload, file open, file read, host
+		// server, physics, host client, host render, host sound, sv think,
+		// matqueue wait (the main thread waiting for the render thread)
+		static const int s_nCounters[] = { 0, 1, 2, 3, 9, 10, 11, 12, 14, 15, 20 };
+		enum { C_COMPILE, C_TEX, C_OPEN, C_READ, C_SERVER, C_PHYSICS, C_CLIENT, C_RENDER, C_SOUND, C_THINK, C_QWAIT, C_COUNT };
+		static SceUInt64 s_nPrevSwap = 0;
+		static uint64_t s_nPrev[C_COUNT][2];
+		static int s_nStallLines = 0;
+		uint64_t nNow[C_COUNT][2], d[C_COUNT][2];
+		for ( int i = 0; i < C_COUNT; i++ )
+		{
+			so_perf_read( s_nCounters[i], &nNow[i][0], &nNow[i][1] );
+			d[i][0] = nNow[i][0] - s_nPrev[i][0];
+			d[i][1] = ( nNow[i][1] - s_nPrev[i][1] ) / 1000;	// ms
+		}
+		char szFiles[192];
+		so_file_notes_take( szFiles, sizeof( szFiles ) );
+		const SceUInt64 nFrameUs = now - s_nPrevSwap;
+		if ( s_nPrevSwap && !so_menus_visible() && s_nStallLines < 100 &&
+			( ( d[C_COMPILE][0] && nFrameUs > 100000 ) || nFrameUs > 500000 ) )
+		{
+			s_nStallLines++;
+			so_trace( "in-game frame %u ms: shader compiles %u (%u ms), texture uploads %u (%u ms), file opens %u + reads %u (%u ms)%s%s; "
+				"server %u ms (physics %u, entity think %u), client %u, render %u (waiting for the render thread %u), sound %u",
+				(unsigned)( nFrameUs / 1000 ),
+				(unsigned)d[C_COMPILE][0], (unsigned)d[C_COMPILE][1], (unsigned)d[C_TEX][0], (unsigned)d[C_TEX][1],
+				(unsigned)d[C_OPEN][0], (unsigned)d[C_READ][0], (unsigned)( d[C_OPEN][1] + d[C_READ][1] ),
+				szFiles[0] ? ": " : "", szFiles,
+				(unsigned)d[C_SERVER][1], (unsigned)d[C_PHYSICS][1], (unsigned)d[C_THINK][1], (unsigned)d[C_CLIENT][1],
+				(unsigned)d[C_RENDER][1], (unsigned)d[C_QWAIT][1], (unsigned)d[C_SOUND][1] );
+		}
+		s_nPrevSwap = now;
+		memcpy( s_nPrev, nNow, sizeof( s_nPrev ) );
+	}
 	if ( s_nSwaps < 3 || now - s_nLastLog >= ( s_bVitaDebug ? 10000000ull : 60000000ull ) )
 	{
 		// a few full frames, at least 30 s apart (the first ones land on
@@ -339,13 +379,13 @@ extern "C" void __wrap_vglSwapBuffers( unsigned char has_commondialog )
 			int prevRead = 0;
 			glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING_, &prevRead );
 			glBindFramebuffer( GL_READ_FRAMEBUFFER_, 0 );
-			SaveFrame( "hl2_frame", ++s_nFramesSaved );
+			SaveFrame( VITA_FILE_PREFIX "_frame", ++s_nFramesSaved );
 			s_nLastFrameSaved = now;
 			glBindFramebuffer( GL_READ_FRAMEBUFFER_, prevRead );
 		}
 		struct mallinfo mi = mallinfo();
 		const int fps10 = s_nLastLog ? (int)( ( s_nSwaps - s_nSwapsAtLog ) * 10000000ull / ( now - s_nLastLog ) ) : 0;
-		// GL programs and shaders in use (vitaGL caps them at 1024 and 2048;
+		// GL programs and shaders in use (vitaGL caps them at 1024 and 4096;
 		// ToGL links one program per shader pair) and ToGL's texture storage
 		int nPrograms = 0, nShaders = 0;
 		vglGetProgramShaderCounts( &nPrograms, &nShaders );
@@ -387,7 +427,7 @@ extern "C" void __wrap_vglSwapBuffers( unsigned char has_commondialog )
 		int prevRead = 0;
 		glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING_, &prevRead );
 		glBindFramebuffer( GL_READ_FRAMEBUFFER_, 0 );
-		SaveFrame( "hl2_shot", ++s_nShots );
+		SaveFrame( VITA_FILE_PREFIX "_shot", ++s_nShots );
 		glBindFramebuffer( GL_READ_FRAMEBUFFER_, prevRead );
 	}
 	s_nSwaps++;
@@ -439,9 +479,11 @@ static void FatalError( const char *msg )
 	so_exit_process( 1 );
 }
 
+#ifndef VITA_GAME_PORTAL
 // The game files are the 20th anniversary update's when this shader has
 // more dynamic combos than the engine's tables (see vertexshaderdx8.cpp).
-// Only checked when the shaders are loose files
+// Only checked when the shaders are loose files. HL2's only: Portal's data
+// gets its own check once the Steam build that works is known
 static bool IsAnniversaryGameData( void )
 {
 	FILE *f = fopen( VITA_BASE_DIR "/hl2/shaders/fxc/vertexlit_and_unlit_generic_ps20b.vcs", "rb" );
@@ -457,6 +499,103 @@ static bool IsAnniversaryGameData( void )
 	}
 	return false;
 }
+#else
+// The dynamic combos of vertexlit_and_unlit_generic_ps20b.vcs, which Portal
+// reads from <hl2 dir>/hl2_misc_dir.vpk: 6 in the engine's tables (see
+// vertexshaderdx8.cpp); Portal's 2025 update (the HL2 20th anniversary
+// engine) has 18. The VPK's directory tree is searched for the file and its
+// header read from the preload bytes or the archive. -1: not found
+static int VpkShaderDynamicCombos( const char *pszHL2Dir )
+{
+	char path[256];
+	if ( snprintf( path, sizeof( path ), "%s/hl2_misc_dir.vpk", pszHL2Dir ) >= (int)sizeof( path ) )
+		return -1;
+	FILE *f = fopen( path, "rb" );
+	if ( !f )
+		return -1;
+	unsigned int vpkHeader[3] = { 0, 0, 0 };	// signature, version, tree size
+	if ( fread( vpkHeader, sizeof( vpkHeader ), 1, f ) != 1 || vpkHeader[0] != 0x55aa1234 ||
+		 ( vpkHeader[1] != 1 && vpkHeader[1] != 2 ) || vpkHeader[2] > 16 * 1024 * 1024 )
+	{
+		fclose( f );
+		return -1;
+	}
+	const unsigned int nTreeStart = vpkHeader[1] == 2 ? 28 : 12;	// v2: four more section sizes
+	const unsigned int nTreeSize = vpkHeader[2];
+	char *pTree = (char *)malloc( nTreeSize + 1 );
+	if ( !pTree || fseek( f, nTreeStart, SEEK_SET ) != 0 || fread( pTree, 1, nTreeSize, f ) != nTreeSize )
+	{
+		free( pTree );
+		fclose( f );
+		return -1;
+	}
+	fclose( f );
+	pTree[nTreeSize] = 0;
+
+	// extension, then directory, then file name, each list ended by an
+	// empty string; every file has an 18-byte entry and its preload bytes.
+	// The tree ends with a 0 (pTree[nTreeSize]), so strlen stops there
+	int nDynamicCombos = -1;
+	bool bFound = false;
+	const char *p = pTree, *pEnd = pTree + nTreeSize;
+	while ( !bFound && p < pEnd && *p )
+	{
+		const char *pszExt = p;
+		p += strlen( p ) + 1;
+		while ( !bFound && p < pEnd && *p )
+		{
+			const char *pszDir = p;
+			p += strlen( p ) + 1;
+			while ( !bFound && p < pEnd && *p )
+			{
+				const char *pszName = p;
+				p += strlen( p ) + 1;
+				if ( p + 18 > pEnd )
+				{
+					p = pEnd;
+					break;
+				}
+				// byte copies: the entries aren't aligned
+				unsigned short nPreload, nArchive;
+				unsigned int nOffset;
+				memcpy( &nPreload, p + 4, 2 );
+				memcpy( &nArchive, p + 6, 2 );
+				memcpy( &nOffset, p + 8, 4 );
+				const char *pPreload = p + 18;
+				p = pPreload + nPreload;
+				bFound = !strcmp( pszExt, "vcs" ) && !strcmp( pszDir, "shaders/fxc" ) && !strcmp( pszName, "vertexlit_and_unlit_generic_ps20b" );
+				if ( !bFound || pPreload + nPreload > pEnd )
+					continue;
+				int header[3] = { 0, 0, 0 };	// version, total combos, dynamic combos
+				unsigned int nHave = nPreload < sizeof( header ) ? nPreload : sizeof( header );
+				memcpy( header, pPreload, nHave );
+				if ( nHave < sizeof( header ) )
+				{
+					// the rest is in an archive (or after the tree, 0x7fff)
+					unsigned int nFileOffset = nOffset;
+					if ( nArchive == 0x7fff )
+						nFileOffset += nTreeStart + nTreeSize;
+					else if ( snprintf( path, sizeof( path ), "%s/hl2_misc_%03u.vpk", pszHL2Dir, nArchive ) >= (int)sizeof( path ) )
+						path[0] = 0;
+					FILE *a = path[0] ? fopen( path, "rb" ) : NULL;
+					if ( a )
+					{
+						if ( fseek( a, nFileOffset, SEEK_SET ) == 0 )
+							nHave += fread( (char *)header + nHave, 1, sizeof( header ) - nHave, a );
+						fclose( a );
+					}
+				}
+				if ( nHave == sizeof( header ) )
+					nDynamicCombos = header[2];
+			}
+			p++;	// the empty name that ends this directory's files
+		}
+		p++;	// the empty directory that ends this extension's
+	}
+	free( pTree );
+	return nDynamicCombos;
+}
+#endif
 
 // Extra arguments, one per whitespace-separated token, from an optional
 // commandline.txt in the base dir, for testing without rebuilding
@@ -486,12 +625,12 @@ static void ReadExtraArgs( EngineArgs *args )
 // engine execs it after the built-in Vita settings (engine/host.cpp).
 static void WriteDefaultUserConfig( void )
 {
-	const char *path = VITA_BASE_DIR "/hl2/cfg/vita_user.cfg";
+	const char *path = VITA_BASE_DIR "/" VITA_GAME_DIR "/cfg/vita_user.cfg";
 	// the current template is always written as vita_user_example.cfg, so
 	// options added later show up without touching the user's own file
-	const char *examplePath = VITA_BASE_DIR "/hl2/cfg/vita_user_example.cfg";
+	const char *examplePath = VITA_BASE_DIR "/" VITA_GAME_DIR "/cfg/vita_user_example.cfg";
 	static const char s_szConfig[] =
-		"// Overrides for the HL2 Vita port, run after its built-in settings.\n"
+		"// Overrides for the " VITA_GAME_SHORT " Vita port, run after its built-in settings.\n"
 		"// Remove the \"//\" in front of a line to turn it on.\n"
 		"\n"
 		"// Client and server frames in parallel (on by default)\n"
@@ -503,7 +642,7 @@ static void WriteDefaultUserConfig( void )
 		"// r_threaded_renderables 0\n"
 		"// r_threaded_particles 0\n"
 		"\n"
-		"// Server tick rate: set -tickrate 66 in ux0:data/halflife2/commandline.txt\n"
+		"// Server tick rate: set -tickrate 66 in " VITA_BASE_DIR "/commandline.txt\n"
 		"// for the original rate (the port runs 33). At 66, entities think every\n"
 		"// other tick (sv_alternateticks 1).\n"
 		"\n"
@@ -560,23 +699,35 @@ static void WriteDefaultUserConfig( void )
 		"// drawn (default 3; 0 = all, higher = faster, more pop-in)\n"
 		"// vita_staticprop_minpixels 0\n"
 		"\n"
+#ifdef VITA_GAME_PORTAL
+		"// Monitors redraw every N frames (default 2)\n"
+#else
 		"// Monitors (Breencast screens) redraw every N frames (default 2)\n"
+#endif
 		"// vita_monitor_interval 1\n"
 		"\n"
+#ifdef VITA_GAME_PORTAL
+		"// Physics: stock collisions (default). 1 lets small, light props (20 kg\n"
+		"// or less) pass through each other, which the HL2 port uses to keep\n"
+		"// fights with debris cheaper; it can let cubes overlap\n"
+		"// vita_physics_small_props 1\n"
+#else
 		"// Physics: small, light props (20 kg or less: junk, planks, gibs) pass\n"
 		"// through each other instead of stacking, which keeps fights with lots\n"
 		"// of debris cheaper (they still hit the world, you, NPCs and bigger\n"
 		"// props). 0 = stock collisions; vita_physics_small_mass sets the limit\n"
 		"// vita_physics_small_props 0\n"
+#endif
 		"\n"
 		"// Texture filtering: 0 = bilinear (visible seams between mip levels)\n"
 		"// mat_trilinear 0\n"
 		"\n"
 		"// Render resolution: add -w 480 -h 272 (faster), -w 720 -h 408 or\n"
 		"// -w 960 -h 544 (native; GPU-bound in busy scenes) to\n"
-		"// ux0:data/halflife2/commandline.txt; the display only takes these\n"
+		"// " VITA_BASE_DIR "/commandline.txt; the display only takes these\n"
 		"// sizes and 640x368 (the default)\n"
 		"\n"
+#ifndef VITA_GAME_PORTAL
 		"// Memory/shader check of late maps: loads each map in vita_maptour_maps\n"
 		"// (ten maps from Eli's lab to Breen's office) and stays\n"
 		"// vita_maptour_seconds (30) in each. Uncomment this for one run (it\n"
@@ -593,21 +744,33 @@ static void WriteDefaultUserConfig( void )
 		"// jittered and bounced here); they still aim and fire. 0 lets them drive\n"
 		"// vita_apc_lock 1\n"
 		"\n"
+#endif
 		"// Detailed section timers in the log (default 0: they cost CPU).\n"
 		"// Turn on for a measurement run only\n"
 		"// vita_profile 1\n"
 		"\n"
+#ifdef VITA_GAME_PORTAL
+		"// Controls (default): R blue portal, L orange portal, cross jump,\n"
+		"// square use, circle and the rear touchpad's left half crouch (STICK1;\n"
+		"// the right half is STICK2), triangle unbound. The touchscreen's left\n"
+#else
 		"// Controls (default): R fire, L alt fire, cross jump, square use,\n"
-		"// triangle flashlight, circle screenshot (vita_screenshot), rear\n"
-		"// touchpad left half crouch (STICK1; the right half is STICK2, unbound).\n"
-		"// Rebind any button\n"
-		"// here, e.g. (names: A_BUTTON B_BUTTON X_BUTTON Y_BUTTON L_SHOULDER\n"
-		"// R_SHOULDER BACK START UP DOWN LEFT RIGHT STICK1 STICK2)\n"
-		"// bind STICK2 +reload\n"
+		"// triangle flashlight, circle reload, rear touchpad left half crouch\n"
+		"// (STICK1) and right half sprint (STICK2). The touchscreen's left\n"
+#endif
+		"// and right halves are JOY11 and JOY12 in game, unbound. Options >\n"
+		"// Controls assigns all of these; or rebind any button here, e.g.\n"
+		"// (names: A_BUTTON B_BUTTON X_BUTTON Y_BUTTON L_SHOULDER R_SHOULDER\n"
+		"// BACK START UP DOWN LEFT RIGHT STICK1 STICK2 JOY11 JOY12)\n"
+#ifdef VITA_GAME_PORTAL
+		"// bind Y_BUTTON +duck\n"
+#else
+		"// bind JOY12 \"impulse 100\"\n"
+#endif
 		"\n"
-		"// Screenshot of the next frame to ux0:data/hl2_shot_NN.tga (for\n"
-		"// reporting visual glitches): on circle by default\n"
-		"// bind B_BUTTON vita_screenshot\n"
+		"// Screenshot of the next frame to ux0:data/" VITA_FILE_PREFIX "_shot_NN.tga (for\n"
+		"// reporting visual glitches): not on a button by default\n"
+		"// bind JOY11 vita_screenshot\n"
 		"\n"
 		"// Frame rate counter\n"
 		"// cl_showfps 1\n";
@@ -655,32 +818,44 @@ static void *EngineThread( void *param )
 
 int main( int argc, char **argv )
 {
-	// The last runs' logs are kept: hl2_vita_boot.1.txt is the previous run's,
+	// The last runs' logs are kept: hl2_vita_boot.1.txt (VITA_FILE_PREFIX,
+	// game.h) is the previous run's,
 	// up to .4, so a crash's log survives relaunching the game
-	sceIoRemove( "ux0:data/hl2_vita_boot.4.txt" );
+	sceIoRemove( "ux0:data/" VITA_FILE_PREFIX "_vita_boot.4.txt" );
 	for ( int i = 3; i >= 1; i-- )
 	{
 		char from[64], to[64];
-		snprintf( from, sizeof( from ), "ux0:data/hl2_vita_boot.%d.txt", i );
-		snprintf( to, sizeof( to ), "ux0:data/hl2_vita_boot.%d.txt", i + 1 );
+		snprintf( from, sizeof( from ), "ux0:data/" VITA_FILE_PREFIX "_vita_boot.%d.txt", i );
+		snprintf( to, sizeof( to ), "ux0:data/" VITA_FILE_PREFIX "_vita_boot.%d.txt", i + 1 );
 		sceIoRename( from, to );
 	}
-	sceIoRename( "ux0:data/hl2_vita_boot.txt", "ux0:data/hl2_vita_boot.1.txt" );
+	sceIoRename( "ux0:data/" VITA_FILE_PREFIX "_vita_boot.txt", "ux0:data/" VITA_FILE_PREFIX "_vita_boot.1.txt" );
+	// engine.log too: tier0 rewrites it at every launch, so a report covering
+	// several attempts had only the last one's (engine.1.log is the previous)
+	sceIoRemove( VITA_BASE_DIR "/engine.4.log" );
+	for ( int i = 3; i >= 1; i-- )
+	{
+		char from[64], to[64];
+		snprintf( from, sizeof( from ), VITA_BASE_DIR "/engine.%d.log", i );
+		snprintf( to, sizeof( to ), VITA_BASE_DIR "/engine.%d.log", i + 1 );
+		sceIoRename( from, to );
+	}
+	sceIoRename( VITA_BASE_DIR "/engine.log", VITA_BASE_DIR "/engine.1.log" );
 	for ( int i = 1; i <= 8; i++ )
 	{
 		char path[64];
-		snprintf( path, sizeof( path ), "ux0:data/hl2_frame_%02d.tga", i );
+		snprintf( path, sizeof( path ), "ux0:data/" VITA_FILE_PREFIX "_frame_%02d.tga", i );
 		sceIoRemove( path );
 	}
 	// manual screenshots (vita_screenshot) from the last session
 	for ( int i = 1; i <= 99; i++ )
 	{
 		char path[64];
-		snprintf( path, sizeof( path ), "ux0:data/hl2_shot_%02d.tga", i );
+		snprintf( path, sizeof( path ), "ux0:data/" VITA_FILE_PREFIX "_shot_%02d.tga", i );
 		if ( sceIoRemove( path ) < 0 )
 			break;
 	}
-	so_trace( "Half-Life 2 for PS Vita " VITA_PORT_VERSION ", built " __DATE__ " " __TIME__ );
+	so_trace( VITA_GAME_NAME " for PS Vita " VITA_PORT_VERSION ", built " __DATE__ " " __TIME__ );
 
 	// Source converts between UTF-8 and wide strings with mbstowcs/wcstombs
 	// on POSIX (tier1 V_strtowcs/V_wcstostr), which only handle non-ASCII
@@ -723,20 +898,61 @@ int main( int argc, char **argv )
 	so_set_library_dir( "app0:bin" );
 
 	SceIoStat stGame, stPlatform;
+#ifdef VITA_GAME_PORTAL
+	// Portal mounts HL2's shared content, the hl2 and platform folders: its
+	// own copy next to portal, or else the HL2 port's in ux0:data/halflife2,
+	// which holds the same files (-vita_sourcedir, filesystem_init.cpp)
+	SceIoStat stHL2;
+	if ( chdir( VITA_BASE_DIR ) != 0 || sceIoGetstat( VITA_BASE_DIR "/portal/gameinfo.txt", &stGame ) < 0 )
+		FatalError( "Portal's game files weren't found.\n\nCopy the portal folder from your Steam copy of Portal to ux0:data/portal/ (you need ux0:data/portal/portal/gameinfo.txt)." );
+	const bool bOwnHL2 = sceIoGetstat( VITA_BASE_DIR "/hl2", &stHL2 ) >= 0;
+	const char *pszSourceDir = bOwnHL2 ? VITA_BASE_DIR : VITA_SHARED_DIR;
+	if ( !bOwnHL2 && sceIoGetstat( VITA_SHARED_DIR "/hl2/hl2_misc_dir.vpk", &stHL2 ) < 0 )
+		FatalError( "Portal's hl2 and platform folders weren't found.\n\nCopy them from your Steam copy of Portal to ux0:data/portal/, next to portal. If Half-Life 2 for PS Vita is installed, Portal uses its folders in ux0:data/halflife2/ instead." );
+	char szSourcePath[256];
+	snprintf( szSourcePath, sizeof( szSourcePath ), "%s/platform", pszSourceDir );
+	if ( sceIoGetstat( szSourcePath, &stPlatform ) < 0 )
+		FatalError( bOwnHL2 ? "The platform folder is missing.\n\nCopy the platform folder from your Steam copy of Portal to ux0:data/portal/, next to portal." :
+			"The platform folder is missing from ux0:data/halflife2/.\n\nCopy the platform folder from your Steam copy of Portal or Half-Life 2 to ux0:data/halflife2/, next to hl2." );
+	snprintf( szSourcePath, sizeof( szSourcePath ), "%s/hl2", pszSourceDir );
+	const int nDynamicCombos = VpkShaderDynamicCombos( szSourcePath );
+	// the portal folder's Steam build, for reports (the SteamPipe Beta
+	// branch's is 8614805)
+	char szInf[512] = "";
+	if ( FILE *fInf = fopen( VITA_BASE_DIR "/portal/steam.inf", "r" ) )
+	{
+		szInf[fread( szInf, 1, sizeof( szInf ) - 1, fInf )] = 0;
+		fclose( fInf );
+	}
+	const char *pszServerVersion = strstr( szInf, "ServerVersion=" );
+	so_trace( "shared content (hl2, platform) from %s: vertexlit_and_unlit_generic_ps20b.vcs has %d dynamic combos (this engine: 6); portal/steam.inf %.*s",
+		pszSourceDir, nDynamicCombos, pszServerVersion ? (int)strcspn( pszServerVersion, "\r\n" ) : 10, pszServerVersion ? pszServerVersion : "not found" );
+	if ( nDynamicCombos > 0 && nDynamicCombos != 6 )
+		FatalError( bOwnHL2 ? "These game files are from Portal's 2025 update, which this port can't run.\n\nIn Steam, open Portal's Properties, choose \"beta - SteamPipe Beta\" under Betas, then copy the portal and hl2 folders again once it has downloaded." :
+			"The Half-Life 2 files in ux0:data/halflife2/ are from its 20th anniversary update, which this port can't run.\n\nIn Steam, switch Half-Life 2 to the beta \"steam_legacy - Pre-20th Anniversary Build\", then copy the hl2 folder again." );
+#else
 	if ( chdir( VITA_BASE_DIR ) != 0 || sceIoGetstat( VITA_BASE_DIR "/hl2/gameinfo.txt", &stGame ) < 0 )
 		FatalError( "Half-Life 2's game files weren't found.\n\nCopy the hl2 and platform folders from your Steam copy of Half-Life 2 to ux0:data/halflife2/ (you need ux0:data/halflife2/hl2/gameinfo.txt).\n\nSee INSTALL_VITA.md, step 4." );
 	if ( sceIoGetstat( VITA_BASE_DIR "/platform", &stPlatform ) < 0 )
 		FatalError( "The platform folder is missing.\n\nCopy the platform folder from your Steam copy of Half-Life 2 to ux0:data/halflife2/, next to hl2.\n\nSee INSTALL_VITA.md, step 4." );
 	if ( IsAnniversaryGameData() )
 		FatalError( "These game files are from Half-Life 2's 20th anniversary update, which this port can't run.\n\nIn Steam, switch Half-Life 2 to the beta \"steam_legacy - Pre-20th Anniversary Build\", then copy the hl2 folder again.\n\nSee INSTALL_VITA.md, step 3." );
+#endif
 	WriteDefaultUserConfig();
 
 	static EngineArgs s_Args;
-	s_Args.argv[s_Args.argc++] = (char *)"hl2_vita";
+	s_Args.argv[s_Args.argc++] = (char *)VITA_FILE_PREFIX "_vita";
 	s_Args.argv[s_Args.argc++] = (char *)"-game";
-	s_Args.argv[s_Args.argc++] = (char *)"hl2";
+	s_Args.argv[s_Args.argc++] = (char *)VITA_GAME_DIR;
 	s_Args.argv[s_Args.argc++] = (char *)"-basedir";
 	s_Args.argv[s_Args.argc++] = (char *)VITA_BASE_DIR;
+#ifdef VITA_GAME_PORTAL
+	if ( !bOwnHL2 )
+	{
+		s_Args.argv[s_Args.argc++] = (char *)"-vita_sourcedir";
+		s_Args.argv[s_Args.argc++] = (char *)VITA_SHARED_DIR;
+	}
+#endif
 	ReadExtraArgs( &s_Args );
 	for ( int i = 1; i < s_Args.argc; i++ )
 		if ( !strcmp( s_Args.argv[i], "-vitadebug" ) )
@@ -798,14 +1014,24 @@ int main( int argc, char **argv )
 	// physics steps and per-tick engine work run half as often as at 66 (the
 	// server frame was the frame-rate limit); engine/host.cpp turns
 	// sv_alternateticks off at this rate so entities still think 33x a second
-	bool bHaveTickrate = false, bMenuMap = false;
+	bool bHaveTickrate = false, bMenuMap = false, bShadersEager = false;
 	for ( int i = 1; i < s_Args.argc; i++ )
 	{
 		if ( !strcmp( s_Args.argv[i], "-tickrate" ) )
 			bHaveTickrate = true;
 		if ( !strcmp( s_Args.argv[i], "-menumap" ) )
 			bMenuMap = true;
+		if ( !strcmp( s_Args.argv[i], "-vita_shaders_eager" ) )
+			bShadersEager = true;
 	}
+	// Shaders are created when first drawn (-shadersondemand): Source would
+	// otherwise create every variant of each material's shaders at map load,
+	// 4-7 times the ones drawn, and on a cold shader cache each is compiled on
+	// the Vita (measured from a cold cache: 24 min to control on the first
+	// map, against 3.5 with this). The cost is a hitch the first time
+	// something new is drawn. "-vita_shaders_eager" in commandline.txt goes back
+	if ( !bShadersEager && s_Args.argc < VITA_MAX_ARGS - 2 )
+		s_Args.argv[s_Args.argc++] = (char *)"-shadersondemand";
 	// Static main menu: GameUI draws console/background01 instead of
 	// loading a background map at startup (the map load took most of the
 	// time to the menu). "-menumap" in commandline.txt brings it back.
@@ -825,7 +1051,7 @@ int main( int argc, char **argv )
 
 	pthread_t thread;
 	if ( pthread_create( &thread, &attr, EngineThread, &s_Args ) != 0 )
-		FatalError( "The game couldn't start (no engine thread).\n\nRestart the Vita and try again. If it keeps happening, report it with ux0:data/hl2_vita_boot.txt." );
+		FatalError( "The game couldn't start (no engine thread).\n\nRestart the Vita and try again. If it keeps happening, report it with ux0:data/" VITA_FILE_PREFIX "_vita_boot.txt." );
 
 	// Keep the screen on and the system awake while the engine runs: without
 	// input the Vita dims and turns off the OLED after a few minutes, and

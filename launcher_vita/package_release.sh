@@ -1,6 +1,7 @@
 #!/bin/sh
 # Packages a release: the VPK and the documents a download should carry,
-# as dist/hl2_vita-<version>.zip.
+# as dist/hl2_vita-<version>.zip (portal_vita-<version>.zip for a Portal
+# build; the game comes from the build, see game.sh).
 #
 # usage: launcher_vita/package_release.sh [waf output dir, default build-vita]
 #
@@ -13,10 +14,11 @@ set -e
 SRC=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$SRC/.." && pwd)
 BUILD=$(cd "$ROOT/${1:-build-vita}" && pwd)
-VPK="$BUILD/launcher_vita/hl2_vita.vpk"
-VERSION=$(sed -n 's/^#define VITA_PORT_VERSION[^"]*"\([^"]*\)".*/\1/p' "$SRC/version.h")
+. "$SRC/game.sh"
+VPK="$BUILD/launcher_vita/$NAME.vpk"
+VERSION=$(sed -n "s/^#define ${VERSION_PREFIX}_VERSION[^\"]*\"\([^\"]*\)\".*/\1/p" "$SRC/version.h")
 
-[ -n "$VERSION" ] || { echo "no VITA_PORT_VERSION in version.h" >&2; exit 1; }
+[ -n "$VERSION" ] || { echo "no ${VERSION_PREFIX}_VERSION in version.h" >&2; exit 1; }
 [ -f "$VPK" ] || { echo "no $VPK; build it first" >&2; exit 1; }
 if [ "$(cat "$VPK.art" 2>/dev/null)" != public ]; then
 	echo "$VPK is a testing build (HL2_VITA_DEV); rebuild without it" >&2
@@ -27,12 +29,15 @@ if [ "$SRC/version.h" -nt "$VPK" ]; then
 	exit 1
 fi
 
-NAME="hl2_vita-$VERSION"
-STAGE="$ROOT/dist/$NAME"
-rm -rf "$STAGE" "$ROOT/dist/$NAME.zip"
+ZIP="$NAME-$VERSION"
+STAGE="$ROOT/dist/$ZIP"
+rm -rf "$STAGE" "$ROOT/dist/$ZIP.zip"
 mkdir -p "$STAGE"
-cp "$VPK" "$STAGE/hl2_vita.vpk"
-cp "$ROOT/README_VITA.md" "$ROOT/INSTALL_VITA.md" "$ROOT/THIRD_PARTY_VITA.md" "$STAGE/"
+cp "$VPK" "$STAGE/$NAME.vpk"
+for doc in $DOCS THIRD_PARTY_VITA.md; do
+	[ -f "$ROOT/$doc" ] || { echo "no $doc to package" >&2; exit 1; }
+	cp "$ROOT/$doc" "$STAGE/"
+done
 # the Source SDK license asks for both with any distribution
 cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
 cp "$ROOT/thirdpartylegalnotices.txt" "$STAGE/"
@@ -43,7 +48,7 @@ cp "$ROOT/thirdpartylegalnotices.txt" "$STAGE/"
 CHECK="$ROOT/dist/.check"
 rm -rf "$CHECK"
 mkdir -p "$CHECK"
-unzip -q "$STAGE/hl2_vita.vpk" -d "$CHECK"
+unzip -q "$STAGE/$NAME.vpk" -d "$CHECK"
 FOUND=0
 for s in "$HOME" "$(id -un)" "$(id -F 2>/dev/null)" "$(hostname -s)"; do
 	[ ${#s} -ge 4 ] || continue
@@ -68,6 +73,6 @@ if grep -n -E "TODO|@[A-Z]+@" "$STAGE"/*.md; then
 fi
 
 # -X: no owner ids or extended attributes in the zip
-(cd "$ROOT/dist" && zip -q -r -X "$NAME.zip" "$NAME" -x '*.DS_Store')
-echo "$ROOT/dist/$NAME.zip"
-shasum -a 256 "$ROOT/dist/$NAME.zip"
+(cd "$ROOT/dist" && zip -q -r -X "$ZIP.zip" "$ZIP" -x '*.DS_Store')
+echo "$ROOT/dist/$ZIP.zip"
+shasum -a 256 "$ROOT/dist/$ZIP.zip"

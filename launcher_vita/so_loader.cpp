@@ -17,7 +17,7 @@
 //
 //=============================================================================//
 #include "so_loader.h"
-#include "version.h"
+#include "game.h"
 
 #include <elf.h>
 #include <pthread.h>
@@ -35,6 +35,8 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/motion.h>
+#include <math.h>
 #include <kubridge.h>
 
 #include <vector>
@@ -136,7 +138,7 @@ static pthread_once_t s_LogOnce = PTHREAD_ONCE_INIT;
 
 static void OpenLog()
 {
-	s_LogFd = sceIoOpen( "ux0:data/hl2_vita_boot.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777 );
+	s_LogFd = sceIoOpen( "ux0:data/" VITA_FILE_PREFIX "_vita_boot.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777 );
 }
 
 extern "C" void so_log_write( const char *text )
@@ -858,6 +860,106 @@ extern "C" void so_perf_count( int counter, uint64_t amount )
 		return;
 	__atomic_add_fetch( &s_PerfCalls[counter], 1, __ATOMIC_RELAXED );
 	__atomic_add_fetch( &s_PerfAmount[counter], amount, __ATOMIC_RELAXED );
+}
+
+// Shader compiles so far (VITA_PERF_SHADER_COMPILE: vitaGL's glCompileShader,
+// a cache read or, on a cold cache, a compile on the Vita) and their time
+extern "C" void so_shader_compiles( uint64_t *pCalls, uint64_t *pMicroseconds )
+{
+	so_perf_read( 0, pCalls, pMicroseconds );
+}
+
+// Files opened since the last swap, by type, for the in-game long-frame
+// line (main.cpp): what a level's first frame reads. Any thread
+static pthread_mutex_t s_FileNoteLock = PTHREAD_MUTEX_INITIALIZER;
+struct SoFileType
+{
+	char m_szExt[8];
+	unsigned m_nOpens;
+};
+static SoFileType s_FileTypes[12];
+static int s_nFileTypes;
+static char s_szFirstFiles[3][64];
+static unsigned s_nFileNotes;
+
+extern "C" void so_file_open_note( const char *path )
+{
+	const char *pDot = strrchr( path, '.' );
+	const char *pExt = ( pDot && !strchr( pDot, '/' ) ) ? pDot + 1 : "-";
+	pthread_mutex_lock( &s_FileNoteLock );
+	if ( s_nFileNotes < 3 )
+		snprintf( s_szFirstFiles[s_nFileNotes], sizeof( s_szFirstFiles[0] ), "%s", path );
+	s_nFileNotes++;
+	int i;
+	for ( i = 0; i < s_nFileTypes; i++ )
+	{
+		if ( !strncmp( s_FileTypes[i].m_szExt, pExt, sizeof( s_FileTypes[i].m_szExt ) - 1 ) )
+			break;
+	}
+	if ( i == s_nFileTypes && s_nFileTypes < 12 )
+	{
+		snprintf( s_FileTypes[i].m_szExt, sizeof( s_FileTypes[i].m_szExt ), "%s", pExt );
+		s_FileTypes[i].m_nOpens = 0;
+		s_nFileTypes++;
+	}
+	if ( i < s_nFileTypes )
+		s_FileTypes[i].m_nOpens++;
+	pthread_mutex_unlock( &s_FileNoteLock );
+}
+
+// "wav 120, vtf 30 (first: a, b, c)" for the opens since the last call
+// (empty if none), and starts over
+extern "C" void so_file_notes_take( char *pszOut, int nOutSize )
+{
+	pszOut[0] = 0;
+	if ( !s_nFileNotes )
+		return;
+	pthread_mutex_lock( &s_FileNoteLock );
+	int nLen = 0;
+	for ( int i = 0; i < s_nFileTypes && nLen < nOutSize; i++ )
+		nLen += snprintf( pszOut + nLen, nOutSize - nLen, "%s%s %u", i ? ", " : "", s_FileTypes[i].m_szExt, s_FileTypes[i].m_nOpens );
+	for ( unsigned i = 0; i < s_nFileNotes && i < 3 && nLen < nOutSize; i++ )
+		nLen += snprintf( pszOut + nLen, nOutSize - nLen, "%s%s", i ? ", " : " (first: ", s_szFirstFiles[i] );
+	if ( nLen < nOutSize )
+		snprintf( pszOut + nLen, nOutSize - nLen, ")" );
+	s_nFileTypes = 0;
+	s_nFileNotes = 0;
+	pthread_mutex_unlock( &s_FileNoteLock );
+}
+
+// A counter's totals so far (VITA_PERF_* in common/vita/vita_perf.h)
+extern "C" void so_perf_read( int counter, uint64_t *pCalls, uint64_t *pMicroseconds )
+{
+	if ( counter < 0 || counter >= SO_PERF_COUNTERS )
+	{
+		*pCalls = *pMicroseconds = 0;
+		return;
+	}
+	*pCalls = __atomic_load_n( &s_PerfCalls[counter], __ATOMIC_RELAXED );
+	*pMicroseconds = __atomic_load_n( &s_PerfTime[counter], __ATOMIC_RELAXED );
+}
+
+// Load checkpoints: the main menu, each map load's start, its material
+// precache (where Source creates the shaders) and the player getting
+// control. Each line gives the shader compiles since the previous one, so
+// a cold shader cache's cost shows up per step. Main thread only
+extern "C" void so_load_mark( const char *what )
+{
+	static uint64_t s_nLastCalls, s_nLastTime, s_nLastAt;
+	static char s_szLast[64] = "launch";
+	uint64_t calls, time;
+	so_shader_compiles( &calls, &time );
+	const uint64_t now = sceKernelGetProcessTimeWide();
+	const uint64_t dt = time - s_nLastTime, span = now - s_nLastAt;
+	so_trace( "mark %s @%u.%01u s (%u.%01u s after %s): shader compiles +%u (%u.%01u s); %u in all (%u.%01u s)",
+		what, (unsigned)( now / 1000000 ), (unsigned)( now / 100000 % 10 ),
+		(unsigned)( span / 1000000 ), (unsigned)( span / 100000 % 10 ), s_szLast,
+		(unsigned)( calls - s_nLastCalls ), (unsigned)( dt / 1000000 ), (unsigned)( dt / 100000 % 10 ),
+		(unsigned)calls, (unsigned)( time / 1000000 ), (unsigned)( time / 100000 % 10 ) );
+	s_nLastCalls = calls;
+	s_nLastTime = time;
+	s_nLastAt = now;
+	snprintf( s_szLast, sizeof( s_szLast ), "%s", what );
 }
 
 extern "C" void so_perf_add( int counter, uint64_t start_us, uint64_t amount )
@@ -1864,7 +1966,7 @@ extern "C" void so_reserve_top( char *pszOut, int nOutSize )
 	}
 }
 
-// The port's version (launcher_vita/version.h), for GameUI's menus
+// The port's version (launcher_vita/version.h, game.h), for GameUI's menus
 extern "C" const char *so_port_version( void )
 {
 	return "v" VITA_PORT_VERSION;
@@ -1880,6 +1982,55 @@ extern "C" void so_set_menus_visible( int bVisible )
 extern "C" int so_menus_visible( void )
 {
 	return s_bMenusVisible;
+}
+
+// Gyro aiming (client in_joystick.cpp, Options > Controls): the Vita's
+// angular velocity about its vertical axis (turning: yaw, positive to the
+// left) and its horizontal axis (tilting: pitch, positive with the top edge
+// coming towards the player), in radians a second (a quick turn of the wrist
+// reads ~3); 0 if the motion sensor
+// isn't available. Sampling starts at the first call, with the system's
+// gyro bias correction, and a small dead zone so a Vita held still doesn't
+// drift the view
+extern "C" int so_gyro_rates( float *pYaw, float *pPitch )
+{
+	static int s_nState = 0;	// 0 not started, 1 sampling, -1 unavailable
+	if ( s_nState == 0 )
+	{
+		s_nState = sceMotionStartSampling() >= 0 ? 1 : -1;
+		if ( s_nState > 0 )
+		{
+			sceMotionSetGyroBiasCorrection( 1 );
+			sceMotionSetDeadband( 1 );
+		}
+		so_trace( "gyro: motion sampling %s", s_nState > 0 ? "started" : "unavailable" );
+	}
+	if ( s_nState < 0 )
+		return 0;
+	SceMotionState state;
+	if ( sceMotionGetState( &state ) < 0 )
+		return 0;
+	const float kDeadZone = 0.02f;	// ~1 degree a second
+	float flYaw = state.angularVelocity.y, flPitch = state.angularVelocity.x;
+	flYaw = fabsf( flYaw ) <= kDeadZone ? 0.0f : flYaw - copysignf( kDeadZone, flYaw );
+	flPitch = fabsf( flPitch ) <= kDeadZone ? 0.0f : flPitch - copysignf( kDeadZone, flPitch );
+
+	*pYaw = flYaw;
+	*pPitch = flPitch;
+	return 1;
+}
+
+// The options menu waits for a button to assign (GameUI VitaMenu.cpp): the
+// front touchscreen's halves act as buttons then too, not only in game
+// (inputsystem joystick_sdl.cpp)
+static volatile int s_bTouchCapture = 0;
+extern "C" void so_set_touch_capture( int bCapture )
+{
+	s_bTouchCapture = bCapture;
+}
+extern "C" int so_touch_capture( void )
+{
+	return s_bTouchCapture;
 }
 
 // vitaGL is initialized (main.cpp's vglInitExtended wrapper): glFinish is safe
@@ -1901,6 +2052,11 @@ extern "C" void so_set_gl_ready( void )
 extern "C" void so_exit_process( int code )
 {
 	so_trace( "exiting (code %d): finishing GPU work", code );
+	// engine.log is flushed every quarter second (tier0 dbg.cpp): write out
+	// the rest, since the logger's destructor doesn't run
+	void ( *pFlushEngineLog )( void ) = (void ( * )( void ))dlsym( RTLD_DEFAULT, "VitaEngineLogFlush" );
+	if ( pFlushEngineLog )
+		pFlushEngineLog();
 	if ( s_bGLReady )
 	{
 		glFinish();

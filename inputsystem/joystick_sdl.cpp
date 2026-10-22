@@ -14,6 +14,9 @@
 #include "SDL_haptic.h"
 #ifdef PLATFORM_VITA
 #include <psp2/touch.h>
+#include "vita_buttons.h"
+extern "C" int so_menus_visible( void );	// launcher: a menu is up
+extern "C" int so_touch_capture( void );	// launcher: the options menu waits for a button
 #endif
 
 // NOTE: This has to be the last file included!
@@ -498,7 +501,7 @@ void CInputSystem::PollJoystick( void )
 #ifdef PLATFORM_VITA
 	// Rear touchpad as two extra buttons the Vita lacks: a finger on the left
 	// half is the left stick click (STICK1, crouch in vita_binds), on the
-	// right half the right stick click (STICK2, unbound)
+	// right half the right stick click (STICK2, sprint)
 	static bool s_bRearTouchStarted = false, s_bRearLeft = false, s_bRearRight = false;
 	if ( !s_bRearTouchStarted )
 	{
@@ -532,6 +535,49 @@ void CInputSystem::PollJoystick( void )
 		else
 			PostButtonReleasedEvent( IE_ButtonReleased, m_nLastSampleTick, KEY_XBUTTON_STICK2, KEY_XBUTTON_STICK2 );
 		s_bRearRight = bRight;
+	}
+
+	// Front touchscreen halves as two more buttons (common/vita/vita_buttons.h),
+	// in game only: in the menus the screen is the mouse (SDL), unless the
+	// options menu is waiting for a button to assign. A touch that began
+	// while they were off doesn't count until every finger has lifted, so a
+	// tap on "Resume" doesn't press a button as the game comes back
+	static bool s_bFrontArmed = false, s_bFrontLeft = false, s_bFrontRight = false;
+	bool bFrontLeft = false, bFrontRight = false;
+	if ( !so_menus_visible() || so_touch_capture() )
+	{
+		SceTouchData front;
+		const int nFront = sceTouchPeek( SCE_TOUCH_PORT_FRONT, &front, 1 ) > 0 ? front.reportNum : 0;
+		if ( !nFront )
+			s_bFrontArmed = true;
+		else if ( s_bFrontArmed )
+		{
+			for ( int i = 0; i < nFront; i++ )
+			{
+				if ( front.report[i].x < 960 )	// the screen spans x 0-1919
+					bFrontLeft = true;
+				else
+					bFrontRight = true;
+			}
+		}
+	}
+	else
+		s_bFrontArmed = false;
+	if ( bFrontLeft != s_bFrontLeft )
+	{
+		if ( bFrontLeft )
+			PostButtonPressedEvent( IE_ButtonPressed, m_nLastSampleTick, VITA_FRONT_TOUCH_LEFT, VITA_FRONT_TOUCH_LEFT );
+		else
+			PostButtonReleasedEvent( IE_ButtonReleased, m_nLastSampleTick, VITA_FRONT_TOUCH_LEFT, VITA_FRONT_TOUCH_LEFT );
+		s_bFrontLeft = bFrontLeft;
+	}
+	if ( bFrontRight != s_bFrontRight )
+	{
+		if ( bFrontRight )
+			PostButtonPressedEvent( IE_ButtonPressed, m_nLastSampleTick, VITA_FRONT_TOUCH_RIGHT, VITA_FRONT_TOUCH_RIGHT );
+		else
+			PostButtonReleasedEvent( IE_ButtonReleased, m_nLastSampleTick, VITA_FRONT_TOUCH_RIGHT, VITA_FRONT_TOUCH_RIGHT );
+		s_bFrontRight = bFrontRight;
 	}
 #endif
 

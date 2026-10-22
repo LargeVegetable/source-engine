@@ -629,6 +629,14 @@ FSReturnCode_t FileSystem_LoadSearchPaths( CFSSearchPathsInit &initInfo )
 			// so we can just use the path as-is.
 
 			pLocation += strlen( BASESOURCEPATHS_TOKEN );
+#ifdef PLATFORM_VITA
+			// -vita_sourcedir: where this shared content is, when it's not in
+			// the base dir. Portal mounts the HL2 port's hl2 and platform
+			// folders (ux0:data/halflife2) when it has no copy of its own
+			// (launcher_vita/main.cpp)
+			if ( const char *pszSourceDir = CommandLine()->ParmValue( "-vita_sourcedir" ) )
+				pszBaseDir = pszSourceDir;
+#endif
 		}
 
 

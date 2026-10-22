@@ -2394,6 +2394,10 @@ SV_SpawnServer
 This is called at the start of each level
 ================
 */
+#ifdef PLATFORM_VITA
+extern "C" void so_load_mark( const char *what );	// launcher: load checkpoint with shader compiles
+#endif
+
 bool CGameServer::SpawnServer( const char *szMapName, const char *szMapFile, const char *startspot )
 {
 	int		i;
@@ -2417,6 +2421,14 @@ bool CGameServer::SpawnServer( const char *szMapName, const char *szMapFile, con
 	ReloadWhitelist( szMapName );
 
 	COM_TimestampedLog( "SV_SpawnServer(%s)", szMapName );
+#ifdef PLATFORM_VITA
+	{
+		// load checkpoint: the shader compiles since the last one (launcher)
+		char szMark[96];
+		V_snprintf( szMark, sizeof( szMark ), "load %s", szMapName );
+		so_load_mark( szMark );
+	}
+#endif
 #ifndef SWDS
 	EngineVGui()->UpdateProgressBar(PROGRESS_SPAWNSERVER);
 #endif

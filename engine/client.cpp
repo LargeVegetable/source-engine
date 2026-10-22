@@ -235,6 +235,10 @@ extern IVEngineClient *engineClient;
 //-----------------------------------------------------------------------------
 #ifdef PLATFORM_VITA
 extern "C" void so_heap_check( const char *where );	// launcher (heap checks with -vitadebug)
+extern "C" void so_load_mark( const char *what );	// launcher: load checkpoint with shader compiles
+void R_CheckForLightingConfigChanges();	// gl_rmain.cpp
+static ConVar vita_lightmaps_at_load( "vita_lightmaps_at_load", "1", FCVAR_NONE,
+	"Vita: rebuild the lightmaps and static prop lighting at the end of a level load, under the loading screen (1), or in the level's first frame as on PC (0)" );
 #endif
 
 bool CClientState::SetSignonState ( int state, int count )
@@ -255,6 +259,8 @@ bool CClientState::SetSignonState ( int state, int count )
 		static const char *s_pszVitaSignon[] = { "signon none", "signon challenge", "signon connected", "signon new", "signon prespawn", "signon spawn", "signon full", "signon changelevel" };
 		if ( ( state == SIGNONSTATE_NEW || state == SIGNONSTATE_FULL ) && CommandLine()->CheckParm( "-vitadebug" ) )
 			so_heap_check( s_pszVitaSignon[state] );
+		if ( state == SIGNONSTATE_FULL )
+			so_load_mark( "in control" );
 	}
 #endif
 
@@ -338,6 +344,14 @@ bool CClientState::SetSignonState ( int state, int count )
 		case SIGNONSTATE_FULL:
 			{
 				CL_FullyConnected();
+#ifdef PLATFORM_VITA
+				// The lightmap rebuild R_LevelInit asks for at every level start
+				// (and the static props' lighting) here, under the loading
+				// screen, instead of in the level's first frame, which it froze
+				// for 0.5-1.2 s
+				if ( vita_lightmaps_at_load.GetBool() )
+					R_CheckForLightingConfigChanges();
+#endif
 				if ( m_NetChannel )
 				{
 					m_NetChannel->SetTimeout( cl_timeout.GetFloat() );
@@ -1850,7 +1864,16 @@ void CClientState::FinishSignonState_New()
 
 	CL_InstallAndInvokeClientStringTableCallbacks();
 
+#ifdef PLATFORM_VITA
+	// log the shader compiles this step costs (with -vita_shaders_eager, Source
+	// creates some of the materials' shaders here; most come earlier, with
+	// the server's model precache)
+	so_load_mark( "material precache start" );
+#endif
 	materials->CacheUsedMaterials();
+#ifdef PLATFORM_VITA
+	so_load_mark( "material precache done" );
+#endif
 
 	// force a consistency check
 	ConsistencyCheck( true );
