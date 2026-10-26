@@ -27,6 +27,7 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/cpu.h>
 #include "vita_perf.h"
+extern "C" void so_thread_name( const char *name );	// launcher: names threads in hang reports
 #endif
 
 #include "tier0/memdbgon.h"
@@ -438,6 +439,7 @@ private:
 			sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 << ( m_iThread % 2 ) );
 			so_thread_register( m_iThread == 0 ? "worker 0 (server)" : m_iThread == 1 ? "worker 1" : "worker" );
 		}
+		so_thread_name( GetName() );	// every pool: FsAsyncIO0, SaveJob0...
 #endif
 
 		// Wait for either a call from the master thread, or an item in the queue...

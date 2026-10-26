@@ -5606,3 +5606,365 @@ static int ReadListFromFile(CUtlVector<char*>* outReplacementMaterials, const ch
 
 	return outReplacementMaterials->Size();
 }
+
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// The main menu's PREPARE SHADERS (common/vita/vita_prepare_shaders.h): every
+// material under materials/ is precached, in batches, as a map load does for
+// its own, and shaderapidx9 creates every dynamic combo of each shader they
+// use (VitaShaderPrepareLoaded), which compiles it into vitaGL's shader
+// cache: what 0.1.0 did map by map, for the whole game at once. After each
+// batch the materials, their textures and the shaders' bytecode are freed
+// (UncacheUnusedMaterials, VitaShaderPurgeUnused), and materials the run
+// created are deleted, so the game is left as it was. Progress is saved per
+// material, so a run can stop and continue, and one that ended without
+// stopping (a crash, the app closed) skips only the material it was loading
+// and counts it. Main menu only: it uses GL directly
+//-----------------------------------------------------------------------------
+#include "vita_prepare_shaders.h"
+#include "texture_group_names.h"
+#include "tier1/fmtstr.h"
+#include <dlfcn.h>
+#include <malloc.h>
+
+extern "C" void so_trace( const char *fmt, ... );	// launcher: boot log
+extern "C" size_t vglMemExternalInUse( void );		// launcher (vitaGL): its objects in the heap
+
+#define VITA_PREPARE_FILE	"cfg/vita_prepare_shaders.txt"
+// bump when the translated shader text changes (togles dx9asmtogl2.cpp,
+// vita_glsl conversion, vitaGL's cache key): old cache entries then miss and
+// "prepared" would be wrong
+#define VITA_PREPARE_STAMP	1
+#define VITA_PREPARE_BATCH	32
+
+typedef int ( *VitaShaderPrepareLoadedFn_t )( uint64_t nDeadline, int *pnCreated, int *pnFailed );
+typedef void ( *VitaShaderVoidFn_t )( void );
+
+struct VitaPrepareSaved_t
+{
+	int nNext;			// the first material not fully prepared (a batch start)
+	int nTotal;
+	int nCurrent;		// the material being loaded when last written
+	int nSkipped;		// materials skipped after runs that ended without stopping
+	bool bComplete;
+	bool bRunning;		// written while working: still set means the run didn't stop
+};
+
+struct VitaPrepareBatchEntry_t
+{
+	IMaterial *pMaterial;
+	bool bCreated;		// loaded by the run (deleted with the batch)
+};
+
+static struct
+{
+	VitaPrepareStatus_t status;
+	CUtlVector< CUtlString > dirs;			// still to list
+	CUtlVector< CUtlString > names;			// the materials found
+	CUtlVector< VitaPrepareBatchEntry_t > batch;
+	VitaPrepareSaved_t saved;
+	bool bResume;
+	bool bCompilePending;
+	int nSkipIndex;							// the material an unclean exit was loading
+	int nBatchStart;
+	uint64_t nStartTime;
+	VitaShaderPrepareLoadedFn_t pfnPrepareLoaded;
+	VitaShaderVoidFn_t pfnPurgeUnused;
+	VitaShaderVoidFn_t pfnReset;
+} s_VitaPrepare;
+
+static void VitaPrepareReadSaved( VitaPrepareSaved_t &saved )
+{
+	memset( &saved, 0, sizeof( saved ) );
+	char szBuf[256];
+	FileHandle_t hFile = g_pFullFileSystem->Open( VITA_PREPARE_FILE, "rt", "MOD" );
+	if ( !hFile )
+		return;
+	const int nRead = g_pFullFileSystem->Read( szBuf, sizeof( szBuf ) - 1, hFile );
+	g_pFullFileSystem->Close( hFile );
+	szBuf[MAX( nRead, 0 )] = 0;
+	int nStamp = 0, nComplete = 0, nRunning = 0;
+	if ( sscanf( szBuf, "stamp %d next %d total %d current %d skipped %d complete %d running %d", &nStamp, &saved.nNext, &saved.nTotal,
+		&saved.nCurrent, &saved.nSkipped, &nComplete, &nRunning ) != 7 || nStamp != VITA_PREPARE_STAMP )
+	{
+		memset( &saved, 0, sizeof( saved ) );
+		return;
+	}
+	saved.bComplete = nComplete != 0;
+	saved.bRunning = nRunning != 0;
+}
+
+static void VitaPrepareWriteSaved( const VitaPrepareSaved_t &saved )
+{
+	char szBuf[200];
+	const int nLen = V_snprintf( szBuf, sizeof( szBuf ), "stamp %d next %d total %d current %d skipped %d complete %d running %d\n",
+		VITA_PREPARE_STAMP, saved.nNext, saved.nTotal, saved.nCurrent, saved.nSkipped, saved.bComplete ? 1 : 0, saved.bRunning ? 1 : 0 );
+	FileHandle_t hFile = g_pFullFileSystem->Open( VITA_PREPARE_FILE, "wt", "MOD" );
+	if ( !hFile )
+		return;
+	g_pFullFileSystem->Write( szBuf, nLen, hFile );
+	g_pFullFileSystem->Close( hFile );
+}
+
+// Lets go of the batch's materials, deletes the ones the run loaded, and
+// frees what only they used
+static void VitaPrepareFreeBatch()
+{
+	for ( int i = 0; i < s_VitaPrepare.batch.Count(); i++ )
+	{
+		IMaterial *pMaterial = s_VitaPrepare.batch[i].pMaterial;
+		pMaterial->DecrementReferenceCount();
+		// not subrect materials, which point into a page
+		if ( s_VitaPrepare.batch[i].bCreated && !pMaterial->InMaterialPage() )
+			pMaterial->DeleteIfUnreferenced();
+	}
+	s_VitaPrepare.batch.RemoveAll();
+	g_MaterialSystem.UncacheUnusedMaterials( true );
+	if ( s_VitaPrepare.pfnPurgeUnused )
+		s_VitaPrepare.pfnPurgeUnused();
+}
+
+static int VitaPrepareCompareNames( const CUtlString *a, const CUtlString *b )
+{
+	return V_stricmp( a->Get(), b->Get() );
+}
+
+// Lists directories under materials/ until the deadline; true when all are done
+static bool VitaPrepareFind( uint64_t nDeadline )
+{
+	while ( s_VitaPrepare.dirs.Count() && so_perf_now() < nDeadline )
+	{
+		CUtlString dir = s_VitaPrepare.dirs.Tail();
+		s_VitaPrepare.dirs.RemoveMultipleFromTail( 1 );
+		char szWild[MAX_PATH];
+		V_snprintf( szWild, sizeof( szWild ), "%s/*", dir.Get() );
+		FileFindHandle_t hFind;
+		for ( const char *pszFile = g_pFullFileSystem->FindFirstEx( szWild, "GAME", &hFind ); pszFile; pszFile = g_pFullFileSystem->FindNext( hFind ) )
+		{
+			if ( pszFile[0] == '.' )
+				continue;
+			char szPath[MAX_PATH];
+			V_snprintf( szPath, sizeof( szPath ), "%s/%s", dir.Get(), pszFile );
+			if ( g_pFullFileSystem->FindIsDirectory( hFind ) )
+			{
+				// per-map patched materials live inside the maps
+				if ( V_stricmp( szPath, "materials/maps" ) )
+					s_VitaPrepare.dirs.AddToTail( CUtlString( szPath ) );
+				continue;
+			}
+			const int nLen = V_strlen( szPath );
+			if ( nLen > 14 && !V_stricmp( szPath + nLen - 4, ".vmt" ) )
+			{
+				szPath[nLen - 4] = 0;
+				s_VitaPrepare.names.AddToTail( CUtlString( szPath + 10 ) );	// without "materials/"
+			}
+		}
+		g_pFullFileSystem->FindClose( hFind );
+	}
+	if ( s_VitaPrepare.dirs.Count() )
+		return false;
+
+	// in order, once each (a material can be in several search paths)
+	CUtlVector< CUtlString > &names = s_VitaPrepare.names;
+	names.Sort( VitaPrepareCompareNames );
+	int nOut = 0;
+	for ( int i = 0; i < names.Count(); i++ )
+	{
+		if ( nOut && !V_stricmp( names[nOut - 1].Get(), names[i].Get() ) )
+			continue;
+		if ( nOut != i )
+			names[nOut] = names[i];
+		nOut++;
+	}
+	names.RemoveMultipleFromTail( names.Count() - nOut );
+	return true;
+}
+
+static void VitaPrepareLog( const char *pszWhat )
+{
+	const VitaPrepareStatus_t &status = s_VitaPrepare.status;
+	// with the heap and vitaGL's share of it: the first full run's heap grew
+	// 15 MB, 11.7 of it vitaGL's, with every shader released
+	struct mallinfo mi = mallinfo();
+	so_trace( "prepare shaders: %s, %d of %d materials, %d shaders (%d failed) in %u s; heap %u KB, vitaGL %u KB", pszWhat,
+		status.nMaterialsDone, status.nMaterialsTotal, status.nShadersCreated, status.nShadersFailed,
+		(unsigned)( ( so_perf_now() - s_VitaPrepare.nStartTime ) / 1000000 ), (unsigned)( mi.uordblks / 1024 ), (unsigned)( vglMemExternalInUse() / 1024 ) );
+}
+
+static void VitaPrepareBegin( bool bResume )
+{
+	VitaPrepareStatus_t &status = s_VitaPrepare.status;
+	memset( &status, 0, sizeof( status ) );
+	s_VitaPrepare.dirs.RemoveAll();
+	s_VitaPrepare.names.RemoveAll();
+	s_VitaPrepare.batch.RemoveAll();
+	s_VitaPrepare.bCompilePending = false;
+	s_VitaPrepare.nSkipIndex = -1;
+	s_VitaPrepare.pfnPrepareLoaded = (VitaShaderPrepareLoadedFn_t)dlsym( RTLD_DEFAULT, "VitaShaderPrepareLoaded" );
+	s_VitaPrepare.pfnPurgeUnused = (VitaShaderVoidFn_t)dlsym( RTLD_DEFAULT, "VitaShaderPurgeUnused" );
+	s_VitaPrepare.pfnReset = (VitaShaderVoidFn_t)dlsym( RTLD_DEFAULT, "VitaShaderPrepareReset" );
+	if ( !s_VitaPrepare.pfnPrepareLoaded || !s_VitaPrepare.pfnPurgeUnused || !s_VitaPrepare.pfnReset )
+	{
+		so_trace( "prepare shaders: shaderapidx9's functions not found" );
+		status.nState = VITA_PREPARE_STOPPED;
+		return;
+	}
+	s_VitaPrepare.pfnReset();
+	VitaPrepareReadSaved( s_VitaPrepare.saved );
+	s_VitaPrepare.bResume = bResume && !s_VitaPrepare.saved.bComplete;
+	if ( !s_VitaPrepare.bResume )
+	{
+		memset( &s_VitaPrepare.saved, 0, sizeof( s_VitaPrepare.saved ) );
+	}
+	else if ( s_VitaPrepare.saved.bRunning )
+	{
+		// the last run ended without stopping, perhaps on this material: it's
+		// skipped this time and counted
+		s_VitaPrepare.nSkipIndex = s_VitaPrepare.saved.nCurrent;
+	}
+	s_VitaPrepare.dirs.AddToTail( CUtlString( "materials" ) );
+	s_VitaPrepare.nStartTime = so_perf_now();
+	status.nState = VITA_PREPARE_FINDING;
+	V_strncpy( status.szCurrent, "Finding materials", sizeof( status.szCurrent ) );
+}
+
+static void VitaPrepareStep( unsigned nBudgetUs )
+{
+	VitaPrepareStatus_t &status = s_VitaPrepare.status;
+	VitaPrepareSaved_t &saved = s_VitaPrepare.saved;
+	const uint64_t nDeadline = so_perf_now() + nBudgetUs;
+	if ( status.nState == VITA_PREPARE_FINDING )
+	{
+		if ( !VitaPrepareFind( nDeadline ) )
+			return;
+		status.nMaterialsTotal = s_VitaPrepare.names.Count();
+		if ( !status.nMaterialsTotal )
+		{
+			so_trace( "prepare shaders: no materials found" );
+			status.nState = VITA_PREPARE_STOPPED;
+			return;
+		}
+		// a different set of materials than the saved run's: from the start
+		if ( saved.nTotal != status.nMaterialsTotal || saved.nNext >= status.nMaterialsTotal )
+		{
+			memset( &saved, 0, sizeof( saved ) );
+			s_VitaPrepare.nSkipIndex = -1;
+		}
+		saved.nTotal = status.nMaterialsTotal;
+		status.nMaterialsDone = saved.nNext;
+		s_VitaPrepare.nBatchStart = saved.nNext;
+		status.nState = VITA_PREPARE_RUNNING;
+		so_trace( "prepare shaders: %d materials, starting at %d%s (%u ms to list them)", status.nMaterialsTotal, saved.nNext,
+			s_VitaPrepare.nSkipIndex >= 0 ? CFmtStr( ", skipping %d (%s): the last run ended while loading it", s_VitaPrepare.nSkipIndex,
+				s_VitaPrepare.nSkipIndex < status.nMaterialsTotal ? s_VitaPrepare.names[s_VitaPrepare.nSkipIndex].Get() : "?" ).Get() : "",
+			(unsigned)( ( so_perf_now() - s_VitaPrepare.nStartTime ) / 1000 ) );
+		return;
+	}
+	if ( status.nState != VITA_PREPARE_RUNNING )
+		return;
+
+	while ( so_perf_now() < nDeadline )
+	{
+		if ( s_VitaPrepare.bCompilePending )
+		{
+			if ( s_VitaPrepare.pfnPrepareLoaded( nDeadline, &status.nShadersCreated, &status.nShadersFailed ) )
+				return;
+			s_VitaPrepare.bCompilePending = false;
+		}
+		const bool bLast = status.nMaterialsDone >= status.nMaterialsTotal;
+		if ( s_VitaPrepare.batch.Count() >= VITA_PREPARE_BATCH || ( bLast && s_VitaPrepare.batch.Count() ) )
+		{
+			VitaPrepareFreeBatch();
+			s_VitaPrepare.nBatchStart = status.nMaterialsDone;
+			saved.nNext = status.nMaterialsDone;
+			if ( status.nMaterialsDone / 256 != ( status.nMaterialsDone - VITA_PREPARE_BATCH ) / 256 )
+				VitaPrepareLog( "progress" );
+			continue;
+		}
+		if ( bLast )
+		{
+			status.nState = VITA_PREPARE_DONE;
+			status.szCurrent[0] = 0;
+			saved.nNext = saved.nCurrent = status.nMaterialsTotal;
+			saved.bComplete = true;
+			saved.bRunning = false;
+			VitaPrepareWriteSaved( saved );
+			VitaPrepareLog( saved.nSkipped ? CFmtStr( "done (%d materials skipped)", saved.nSkipped ).Get() : "done" );
+			s_VitaPrepare.names.Purge();
+			return;
+		}
+
+		const int nIndex = status.nMaterialsDone++;
+		if ( nIndex == s_VitaPrepare.nSkipIndex )
+		{
+			saved.nSkipped++;
+			continue;
+		}
+		const char *pszName = s_VitaPrepare.names[nIndex].Get();
+		V_strncpy( status.szCurrent, pszName, sizeof( status.szCurrent ) );
+		// written before loading it, so a crash in it can be told apart
+		saved.nCurrent = nIndex;
+		saved.bRunning = true;
+		VitaPrepareWriteSaved( saved );
+		const bool bCreated = !g_MaterialSystem.IsMaterialLoaded( pszName );
+		IMaterial *pMaterial = g_MaterialSystem.FindMaterial( pszName, TEXTURE_GROUP_OTHER, false );
+		if ( !pMaterial || pMaterial->IsErrorMaterial() )
+			continue;
+		pMaterial->IncrementReferenceCount();
+		static_cast< IMaterialInternal * >( pMaterial )->GetRealTimeVersion()->Precache();
+		VitaPrepareBatchEntry_t &entry = s_VitaPrepare.batch[s_VitaPrepare.batch.AddToTail()];
+		entry.pMaterial = pMaterial;
+		entry.bCreated = bCreated;
+		s_VitaPrepare.bCompilePending = true;
+	}
+}
+
+DLL_EXPORT int VitaPrepareShaders( int nCommand, unsigned nBudgetUs, VitaPrepareStatus_t *pStatus )
+{
+	VitaPrepareStatus_t &status = s_VitaPrepare.status;
+	switch ( nCommand )
+	{
+	case VITA_PREPARE_QUERY:
+	{
+		VitaPrepareSaved_t saved;
+		VitaPrepareReadSaved( saved );
+		status.nSavedDone = saved.nNext;
+		status.nSavedTotal = saved.nTotal;
+		status.nSavedSkipped = saved.nSkipped;
+		status.bSavedComplete = saved.bComplete ? 1 : 0;
+		break;
+	}
+	case VITA_PREPARE_START:
+	case VITA_PREPARE_RESTART:
+		VitaPrepareBegin( nCommand == VITA_PREPARE_START );
+		break;
+	case VITA_PREPARE_STEP:
+		VitaPrepareStep( nBudgetUs );
+		break;
+	case VITA_PREPARE_STOP:
+		if ( status.nState == VITA_PREPARE_RUNNING || status.nState == VITA_PREPARE_FINDING )
+		{
+			const bool bListed = status.nState == VITA_PREPARE_RUNNING;
+			VitaPrepareFreeBatch();
+			status.nState = VITA_PREPARE_STOPPED;
+			if ( bListed )
+			{
+				// the batch just freed was prepared only partly: it's done
+				// again next time (its finished shaders are then cache reads)
+				VitaPrepareSaved_t &saved = s_VitaPrepare.saved;
+				saved.nNext = s_VitaPrepare.nBatchStart;
+				saved.nCurrent = s_VitaPrepare.nBatchStart;
+				saved.bRunning = false;
+				VitaPrepareWriteSaved( saved );
+				VitaPrepareLog( "stopped" );
+			}
+			s_VitaPrepare.names.Purge();
+			s_VitaPrepare.dirs.Purge();
+		}
+		break;
+	}
+	if ( pStatus )
+		*pStatus = status;
+	return status.nState;
+}
+#endif

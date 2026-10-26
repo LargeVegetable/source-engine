@@ -1731,6 +1731,10 @@ static void VitaUpdatePhysicsStep()
 	const float flVehicleStep = vita_phys_vehicle_step.GetFloat();
 	if ( flVehicleStep > 0.0f && flVehicleStep < flTick )
 	{
+		// a load or new game moves curtime back: a hold set in the old
+		// timeline would keep the costlier step for nothing
+		if ( s_flVehicleAwakeUntil > gpGlobals->curtime + 2.0f )
+			s_flVehicleAwakeUntil = 0.0f;
 		if ( CFourWheelVehiclePhysics::VitaWheeledVehicleAwake() )
 			s_flVehicleAwakeUntil = gpGlobals->curtime + 2.0f;
 		if ( gpGlobals->curtime < s_flVehicleAwakeUntil )

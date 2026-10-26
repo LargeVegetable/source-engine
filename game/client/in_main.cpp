@@ -26,6 +26,11 @@
 #include <ctype.h> // isalnum()
 #include <voice_status.h>
 #include "cam_thirdperson.h"
+#ifdef PLATFORM_VITA
+#include "inputsystem/iinputsystem.h"
+#include "cdll_client_int.h"
+#include "iclientvehicle.h"
+#endif
 
 #ifdef SIXENSE
 #include "sixense/in_sixense.h"
@@ -1105,6 +1110,36 @@ void CInput::ExtraMouseSample( float frametime, bool active )
 
 }
 
+#ifdef PLATFORM_VITA
+// Alternative vehicle controls (Options > Controls): in the airboat and the
+// buggy, cross accelerates and circle reverses (brakes while moving
+// forward), over the left stick, which still steers and drives. Their own
+// actions (jump, the handbrake in a vehicle, and reload) are off while
+// driving; the handbrake moves to the rear touchpad's left half (crouch,
+// which does nothing in a vehicle)
+static ConVar vita_vehicle_buttons( "vita_vehicle_buttons", "0", FCVAR_ARCHIVE, "Vita: in the airboat and the buggy, cross accelerates, circle reverses, rear-left touch is the handbrake" );
+
+static void VitaVehicleButtons( CUserCmd *cmd )
+{
+	if ( !vita_vehicle_buttons.GetBool() || !inputsystem )
+		return;
+	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
+	IClientVehicle *pVehicle = pPlayer ? pPlayer->GetVehicle() : NULL;
+	C_BaseEntity *pEnt = pVehicle ? pVehicle->GetVehicleEnt() : NULL;
+	ClientClass *pClass = pEnt ? pEnt->GetClientClass() : NULL;
+	if ( !pClass || ( !V_stristr( pClass->m_pNetworkName, "Airboat" ) && !V_stristr( pClass->m_pNetworkName, "Jeep" ) ) )
+		return;
+	const bool bHandbrake = ( cmd->buttons & IN_DUCK ) != 0;
+	cmd->buttons &= ~( IN_JUMP | IN_RELOAD | IN_DUCK );
+	if ( bHandbrake )
+		cmd->buttons |= IN_JUMP;
+	if ( inputsystem->IsButtonDown( KEY_XBUTTON_A ) )
+		cmd->forwardmove = cl_forwardspeed.GetFloat();
+	else if ( inputsystem->IsButtonDown( KEY_XBUTTON_B ) )
+		cmd->forwardmove = -cl_backspeed.GetFloat();
+}
+#endif
+
 void CInput::CreateMove ( int sequence_number, float input_sample_frametime, bool active )
 {	
 	CUserCmd *cmd = &m_pCommands[ sequence_number % MULTIPLAYER_BACKUP ];
@@ -1191,6 +1226,9 @@ void CInput::CreateMove ( int sequence_number, float input_sample_frametime, boo
 #else
 	// Set button and flag bits
 	cmd->buttons = GetButtonBits( 1 );
+#endif
+#ifdef PLATFORM_VITA
+	VitaVehicleButtons( cmd );
 #endif
 
 	// Using joystick?

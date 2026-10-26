@@ -29,9 +29,11 @@
 #include <reent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <psp2/io/fcntl.h>
 #include <psp2/kernel/clib.h>
+#include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
@@ -943,8 +945,12 @@ extern "C" void so_perf_read( int counter, uint64_t *pCalls, uint64_t *pMicrosec
 // precache (where Source creates the shaders) and the player getting
 // control. Each line gives the shader compiles since the previous one, so
 // a cold shader cache's cost shows up per step. Main thread only
+static void ShaderRecordMap( const char *pszMap );
+
 extern "C" void so_load_mark( const char *what )
 {
+	if ( !strncmp( what, "load ", 5 ) )
+		ShaderRecordMap( what + 5 );
 	static uint64_t s_nLastCalls, s_nLastTime, s_nLastAt;
 	static char s_szLast[64] = "launch";
 	uint64_t calls, time;
@@ -1491,6 +1497,323 @@ static void ThreadsLog( unsigned nFrames )
 		so_trace( "%s", line );
 }
 
+//-----------------------------------------------------------------------------
+// Shader record (testing builds; main.cpp starts it): one line per shader
+// created at first draw, "v|p <name> <static> <dynamic> <ms>", after a
+// "map <name>" line per map loaded, for the per-map lists a prepare-shaders
+// step would compile. Buffered and written by the launcher's main loop
+// each second, so the game's threads never wait on the memory card
+//-----------------------------------------------------------------------------
+static SceUID s_nShaderRecordFd = -1;
+static char s_szShaderRecord[32 * 1024];
+static int s_nShaderRecordLen;
+static pthread_mutex_t s_ShaderRecordLock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned s_nShaderRecordDropped;
+
+extern "C" void so_shader_record_start( const char *path, const char *header )
+{
+	s_nShaderRecordFd = sceIoOpen( path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777 );
+	if ( s_nShaderRecordFd < 0 )
+	{
+		so_trace( "shader record: can't open %s (0x%08x)", path, (unsigned)s_nShaderRecordFd );
+		return;
+	}
+	so_trace( "shader record: %s", path );
+	sceIoWrite( s_nShaderRecordFd, header, strlen( header ) );
+}
+
+static void ShaderRecordAppend( const char *line, int len )
+{
+	pthread_mutex_lock( &s_ShaderRecordLock );
+	if ( s_nShaderRecordLen + len <= (int)sizeof( s_szShaderRecord ) )
+	{
+		memcpy( s_szShaderRecord + s_nShaderRecordLen, line, len );
+		s_nShaderRecordLen += len;
+	}
+	else
+		s_nShaderRecordDropped++;
+	pthread_mutex_unlock( &s_ShaderRecordLock );
+}
+
+static void ShaderRecordMap( const char *pszMap )
+{
+	if ( s_nShaderRecordFd < 0 )
+		return;
+	char line[160];
+	int len = snprintf( line, sizeof( line ), "map %s\n", pszMap );
+	if ( len > 0 && len < (int)sizeof( line ) )
+		ShaderRecordAppend( line, len );
+}
+
+extern "C" void so_shader_record( int bVertex, const char *pName, int nStatic, int nDynamic, unsigned nMicroseconds, int bFailed )
+{
+	if ( s_nShaderRecordFd < 0 )
+		return;
+	char line[200];
+	int len = snprintf( line, sizeof( line ), "%c %s %d %d %u%s\n", bVertex ? 'v' : 'p', pName ? pName : "?",
+		nStatic, nDynamic, ( nMicroseconds + 500 ) / 1000, bFailed ? " failed" : "" );
+	if ( len > 0 && len < (int)sizeof( line ) )
+		ShaderRecordAppend( line, len );
+}
+
+// main loop, each second, and at exit
+extern "C" void so_shader_record_flush( void )
+{
+	if ( s_nShaderRecordFd < 0 )
+		return;
+	static char s_szOut[sizeof( s_szShaderRecord )];
+	pthread_mutex_lock( &s_ShaderRecordLock );
+	const int len = s_nShaderRecordLen;
+	memcpy( s_szOut, s_szShaderRecord, len );
+	s_nShaderRecordLen = 0;
+	const unsigned nDropped = s_nShaderRecordDropped;
+	s_nShaderRecordDropped = 0;
+	pthread_mutex_unlock( &s_ShaderRecordLock );
+	if ( len )
+		sceIoWrite( s_nShaderRecordFd, s_szOut, len );
+	if ( nDropped )
+		so_trace( "shader record: %u lines dropped (buffer full)", nDropped );
+}
+
+//-----------------------------------------------------------------------------
+// Hang reports. The modules' blocking waits go through the wrappers below
+// (build.sh --wrap): a contended pthread_mutex_lock (CThreadMutex), every
+// pthread_cond_timedwait (CThreadEvent, job waits) and usleep (ThreadSleep in
+// polling loops). While one blocks, a slot holds the thread, the object, the
+// caller and the stack position. Once no perf counter has moved for
+// SO_HANG_SECONDS (no frame, file read, shader compile or texture upload),
+// so_hang_check logs each waiting thread with the return addresses on its
+// stack, innermost first, once per stall. module+offset is the module's own
+// address and exe+offset is from 0x81000000 in hl2_vita.elf, for
+// arm-vita-eabi-addr2line. An uncontended lock costs one trylock, as before
+//-----------------------------------------------------------------------------
+#define SO_HANG_SECONDS 30
+#define SO_WAITS 48
+#define SO_THREAD_NAMES 48
+
+struct SoWait
+{
+	SceUID uid;		// 0: free
+	int ready;		// the fields below are filled in
+	const char *what;
+	const void *object;
+	uintptr_t caller;
+	uintptr_t sp;
+	uint64_t since;
+};
+static SoWait s_Waits[SO_WAITS];
+
+struct SoThreadName
+{
+	SceUID uid;
+	char name[32];
+};
+static SoThreadName s_ThreadNames[SO_THREAD_NAMES];
+static int s_nThreadNames;
+
+static SoWait *WaitBegin( const char *what, const void *object, void *caller, const volatile void *sp )
+{
+	const SceUID uid = sceKernelGetThreadId();
+	for ( int i = 0; i < SO_WAITS; i++ )
+	{
+		SceUID expected = 0;
+		if ( __atomic_load_n( &s_Waits[i].uid, __ATOMIC_RELAXED ) == 0 &&
+			__atomic_compare_exchange_n( &s_Waits[i].uid, &expected, uid, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED ) )
+		{
+			SoWait *w = &s_Waits[i];
+			w->what = what;
+			w->object = object;
+			w->caller = (uintptr_t)caller;
+			w->sp = (uintptr_t)sp;
+			w->since = sceKernelGetProcessTimeWide();
+			__atomic_store_n( &w->ready, 1, __ATOMIC_RELEASE );
+			return w;
+		}
+	}
+	return NULL;
+}
+
+static void WaitEnd( SoWait *w )
+{
+	if ( !w )
+		return;
+	__atomic_store_n( &w->ready, 0, __ATOMIC_RELAXED );
+	__atomic_store_n( &w->uid, 0, __ATOMIC_RELEASE );
+}
+
+extern "C" int __real_pthread_mutex_lock( pthread_mutex_t *mutex );
+extern "C" int __wrap_pthread_mutex_lock( pthread_mutex_t *mutex )
+{
+	int result = pthread_mutex_trylock( mutex );
+	if ( result != EBUSY )
+		return result;
+	volatile int marker = 0;
+	SoWait *w = WaitBegin( "mutex", mutex, __builtin_return_address( 0 ), &marker );
+	result = __real_pthread_mutex_lock( mutex );
+	WaitEnd( w );
+	return result;
+}
+
+extern "C" int __real_pthread_cond_timedwait( pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime );
+extern "C" int __wrap_pthread_cond_timedwait( pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime )
+{
+	volatile int marker = 0;
+	SoWait *w = WaitBegin( "event", cond, __builtin_return_address( 0 ), &marker );
+	const int result = __real_pthread_cond_timedwait( cond, mutex, abstime );
+	WaitEnd( w );
+	return result;
+}
+
+extern "C" int __real_usleep( useconds_t usec );
+extern "C" int __wrap_usleep( useconds_t usec )
+{
+	volatile int marker = 0;
+	SoWait *w = WaitBegin( "sleep", NULL, __builtin_return_address( 0 ), &marker );
+	const int result = __real_usleep( usec );
+	WaitEnd( w );
+	return result;
+}
+
+// tier0's CThread::ThreadProc: names the calling thread in hang reports
+// (thread pools name theirs FsAsyncIO0, SaveJob0 and so on). A ring: the
+// oldest names go first
+extern "C" void so_thread_name( const char *name )
+{
+	SoThreadName &t = s_ThreadNames[(unsigned)__atomic_fetch_add( &s_nThreadNames, 1, __ATOMIC_RELAXED ) % SO_THREAD_NAMES];
+	__atomic_store_n( &t.uid, 0, __ATOMIC_RELAXED );
+	snprintf( t.name, sizeof( t.name ), "%s", name ? name : "" );
+	__atomic_store_n( &t.uid, sceKernelGetThreadId(), __ATOMIC_RELEASE );
+}
+
+static const char *ThreadName( SceUID uid, const SceKernelThreadInfo &info )
+{
+	const int nThreads = __atomic_load_n( &s_nThreads, __ATOMIC_RELAXED );
+	for ( int i = 0; i < nThreads && i < SO_THREADS; i++ )
+	{
+		if ( __atomic_load_n( &s_Threads[i].uid, __ATOMIC_ACQUIRE ) == uid )
+			return s_Threads[i].name;
+	}
+	for ( int i = 0; i < SO_THREAD_NAMES; i++ )
+	{
+		if ( __atomic_load_n( &s_ThreadNames[i].uid, __ATOMIC_ACQUIRE ) == uid )
+			return s_ThreadNames[i].name;
+	}
+	return info.name;	// the kernel's
+}
+
+// " module+0xoffset" for a return address (odd: everything is Thumb) in a
+// module's code or the launcher's
+static bool DescribeCode( uintptr_t addr, uintptr_t exeText, size_t exeSize, char *out, size_t size )
+{
+	if ( !( addr & 1 ) )
+		return false;
+	addr &= ~(uintptr_t)1;
+	if ( addr >= exeText && addr < exeText + exeSize )
+	{
+		snprintf( out, size, " exe+0x%x", (unsigned)( addr - exeText ) );
+		return true;
+	}
+	for ( SoModule *mod : s_Modules )
+	{
+		for ( const SoSegment &seg : mod->segments )
+		{
+			if ( seg.exec && addr >= seg.addr && addr < seg.addr + seg.size )
+			{
+				snprintf( out, size, " %s+0x%x", mod->name, (unsigned)( addr - mod->base ) );
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void HangReport( void )
+{
+	so_trace( "hang? nothing has moved for %d s (no frame, file read, shader compile or texture upload)", SO_HANG_SECONDS );
+
+	uintptr_t exeText = 0;
+	size_t exeSize = 0;
+	SceKernelModuleInfo mod;
+	mod.size = sizeof( mod );
+	if ( sceKernelGetModuleInfo( sceKernelGetModuleIdByAddr( (void *)&HangReport ), &mod ) >= 0 )
+	{
+		exeText = (uintptr_t)mod.segments[0].vaddr;
+		exeSize = mod.segments[0].memsz;
+	}
+
+	// the named threads, waiting in a noted wait or not
+	const int nThreads = __atomic_load_n( &s_nThreads, __ATOMIC_RELAXED );
+	for ( int i = 0; i < nThreads && i < SO_THREADS; i++ )
+	{
+		SceKernelThreadInfo info;
+		info.size = sizeof( info );
+		const SceUID uid = __atomic_load_n( &s_Threads[i].uid, __ATOMIC_ACQUIRE );
+		if ( uid && sceKernelGetThreadInfo( uid, &info ) >= 0 )
+			so_trace( "  thread %s: status 0x%x, kernel wait type 0x%x on 0x%x", s_Threads[i].name,
+				(unsigned)info.status, (unsigned)info.waitType, (unsigned)info.waitId );
+	}
+
+	// every thread blocked in a noted wait, with its stack
+	const uint64_t now = sceKernelGetProcessTimeWide();
+	for ( int i = 0; i < SO_WAITS; i++ )
+	{
+		SoWait &w = s_Waits[i];
+		if ( !__atomic_load_n( &w.ready, __ATOMIC_ACQUIRE ) )
+			continue;
+		const SceUID uid = __atomic_load_n( &w.uid, __ATOMIC_RELAXED );
+		const uintptr_t sp = w.sp;
+		SceKernelThreadInfo info;
+		info.size = sizeof( info );
+		if ( !uid || sceKernelGetThreadInfo( uid, &info ) < 0 )
+			continue;
+		char caller[64];
+		if ( !DescribeCode( w.caller, exeText, exeSize, caller, sizeof( caller ) ) )
+			snprintf( caller, sizeof( caller ), " 0x%08x", (unsigned)w.caller );
+		so_trace( "  %s (0x%x, status 0x%x): %s 0x%08x for %u ms, called from%s", ThreadName( uid, info ), (unsigned)uid,
+			(unsigned)info.status, w.what, (unsigned)(uintptr_t)w.object, (unsigned)( ( now - w.since ) / 1000 ), caller );
+
+		const uintptr_t top = (uintptr_t)info.stack + info.stackSize;
+		if ( sp < (uintptr_t)info.stack || sp >= top )
+			continue;
+		char line[480];
+		int len = snprintf( line, sizeof( line ), "    stack:" );
+		int nFound = 0;
+		for ( const uint32_t *p = (const uint32_t *)( sp & ~(uintptr_t)3 ); (uintptr_t)p < top && nFound < 48; p++ )
+		{
+			char where[64];
+			if ( !DescribeCode( *p, exeText, exeSize, where, sizeof( where ) ) )
+				continue;
+			if ( len + (int)strlen( where ) >= (int)sizeof( line ) )
+			{
+				so_trace( "%s", line );
+				len = snprintf( line, sizeof( line ), "    stack:" );
+			}
+			len += snprintf( line + len, sizeof( line ) - len, "%s", where );
+			nFound++;
+		}
+		so_trace( "%s", line );
+	}
+	so_trace( "hang? end of report" );
+}
+
+// The launcher's main loop, every second
+extern "C" void so_hang_check( void )
+{
+	static uint64_t s_nLastSum;
+	static int s_nStill;
+	uint64_t sum = 0;
+	for ( int i = 0; i < SO_PERF_COUNTERS; i++ )
+		sum += __atomic_load_n( &s_PerfCalls[i], __ATOMIC_RELAXED );
+	if ( sum != s_nLastSum )
+	{
+		s_nLastSum = sum;
+		s_nStill = 0;
+		return;
+	}
+	if ( ++s_nStill == SO_HANG_SECONDS )
+		HangReport();
+}
+
 // Named sections: a small table matched on the caller's string pointers
 // (fast path) or the copied text; a spinlock covers it, since client jobs
 // (bone setup, particles) add from worker threads
@@ -1984,6 +2307,20 @@ extern "C" int so_menus_visible( void )
 	return s_bMenusVisible;
 }
 
+// A long task with no input (GameUI's PREPARE SHADERS, hours): the main loop
+// keeps the system awake but lets the screen dim and turn off, against burn
+// in on the OLED and to save the battery
+static volatile int s_bLongTask;
+extern "C" void so_set_long_task( int bActive )
+{
+	s_bLongTask = bActive;
+}
+
+extern "C" int so_long_task( void )
+{
+	return s_bLongTask;
+}
+
 // Gyro aiming (client in_joystick.cpp, Options > Controls): the Vita's
 // angular velocity about its vertical axis (turning: yaw, positive to the
 // left) and its horizontal axis (tilting: pitch, positive with the top edge
@@ -2057,6 +2394,7 @@ extern "C" void so_exit_process( int code )
 	void ( *pFlushEngineLog )( void ) = (void ( * )( void ))dlsym( RTLD_DEFAULT, "VitaEngineLogFlush" );
 	if ( pFlushEngineLog )
 		pFlushEngineLog();
+	so_shader_record_flush();
 	if ( s_bGLReady )
 	{
 		glFinish();

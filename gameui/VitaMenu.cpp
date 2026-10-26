@@ -20,6 +20,8 @@
 #include "vgui_controls/KeyRepeat.h"
 #include "inputsystem/iinputsystem.h"
 #include "vita_buttons.h"
+#include "vita_prepare_shaders.h"
+#include <dlfcn.h>
 #include "bitmap/tgaloader.h"
 #include "filesystem.h"
 #include "tier1/convar.h"
@@ -1121,7 +1123,13 @@ public:
 	}
 
 protected:
-	enum { CONFIRM_START = 1 };
+	enum { CONFIRM_START = 1, CONFIRM_UNLOCK };
+
+	bool AllUnlocked() const
+	{
+		ConVarRef unlocked( "sv_unlockedchapters" );
+		return !unlocked.IsValid() || unlocked.GetInt() >= m_Chapters.Count();
+	}
 
 	virtual void Refresh()
 	{
@@ -1149,11 +1157,27 @@ protected:
 				row.m_Label = "Locked";
 		}
 		m_Hints.RemoveAll();
-		const VitaHint_t hints[] = { { VG_DPAD, "Difficulty" }, { VG_CROSS, "Start" }, { VG_CIRCLE, "Back" } };
 		if ( m_bDifficulty )
-			m_Hints.AddMultipleToTail( 3, hints );
-		else
-			m_Hints.AddMultipleToTail( 2, hints + 1 );
+		{
+			const VitaHint_t hint = { VG_DPAD, "Difficulty" };
+			m_Hints.AddToTail( hint );
+		}
+		const VitaHint_t start = { VG_CROSS, "Start" };
+		m_Hints.AddToTail( start );
+		if ( !AllUnlocked() )
+		{
+			const VitaHint_t unlock = { VG_TRIANGLE, "Unlock all" };
+			m_Hints.AddToTail( unlock );
+		}
+		const VitaHint_t back = { VG_CIRCLE, "Back" };
+		m_Hints.AddToTail( back );
+	}
+
+	// triangle: every chapter can be started, as if the game had been played through
+	virtual void OnTriangle( int nRow )
+	{
+		if ( !AllUnlocked() )
+			Confirm( "Unlock all chapters?\nAny of them can then be started from here.", CONFIRM_UNLOCK );
 	}
 
 	// the first chapter, as on the consoles (the difficulty is row 0)
@@ -1182,6 +1206,18 @@ protected:
 	{
 		if ( nId == CONFIRM_START )
 			Start();
+		else if ( nId == CONFIRM_UNLOCK )
+		{
+			ConVarRef unlocked( "sv_unlockedchapters" );
+			if ( unlocked.IsValid() )
+				unlocked.SetValue( m_Chapters.Count() );
+			// saved now (config.cfg), not only when the game quits
+			engine->ClientCmd_Unrestricted( "host_writeconfig\n" );
+			VitaPlaySound( "UI/buttonclick.wav" );
+			const int nSel = m_nSel;
+			Refresh();
+			SetSelection( nSel );
+		}
 	}
 
 	virtual bool HasDetail() const { return true; }
@@ -1337,6 +1373,10 @@ static const VitaOption_t s_VitaOptions[] =
 	{ TAB_CONTROLS, OPT_BIND, "Quick load", "load quick" },
 	{ TAB_CONTROLS, OPT_LOOK, "Look sensitivity" },
 	{ TAB_CONTROLS, OPT_CHOICE, "Invert look", "joy_inverty", "0:Off|1:On" },
+	// client in_joystick.cpp (GitHub issue #11)
+	{ TAB_CONTROLS, OPT_CHOICE, "Look acceleration", "vita_look_accel", "0:Off|1:On" },
+	// client in_main.cpp: the airboat and the buggy (rear-left touch is then the handbrake)
+	{ TAB_CONTROLS, OPT_CHOICE, "Vehicle controls", "vita_vehicle_buttons", "0:Stick|1:Cross & circle" },
 	// gyro aiming (client in_joystick.cpp; GitHub issue #3)
 	{ TAB_CONTROLS, OPT_CHOICE, "Gyro aiming", "vita_gyro", "0:Off|1:On" },
 	{ TAB_CONTROLS, OPT_SLIDER, "Gyro sensitivity", "vita_gyro_sensitivity", NULL, 0.5f, 3.0f, 0.25f },
@@ -1346,6 +1386,7 @@ static const VitaOption_t s_VitaOptions[] =
 	{ TAB_GAME, OPT_CHOICE, "Crosshair", "crosshair", "0:Off|1:On" },
 	{ TAB_AUDIO, OPT_SLIDER, "Volume", "volume", NULL, 0.0f, 1.0f, 0.1f },
 	{ TAB_AUDIO, OPT_SLIDER, "Music", "snd_musicvolume", NULL, 0.0f, 1.0f, 0.1f },
+	{ TAB_VIDEO, OPT_CHOICE, "Field of view", "fov_desired", "55:55|60:60|65:65|70:70|75:75 (default)|80:80|85:85|90:90" },	// GitHub issue #10
 	{ TAB_VIDEO, OPT_CHOICE, "HUD size", "vita_hud_size", "0:Normal|1:Large|2:Larger" },	// client clientmode_shared.cpp
 	{ TAB_VIDEO, OPT_CHOICE, "Show FPS", "cl_showfps", "0:Off|1:On" },
 	{ TAB_VIDEO, OPT_FLEX, "Facial animation" },
@@ -1374,6 +1415,8 @@ static bool VitaOptionShown( const VitaOption_t &opt )
 {
 	if ( opt.m_nType == OPT_CHOICE && !V_strcmp( opt.m_pszCvar, "skill" ) )
 		return !ModInfo().NoDifficulty();
+	if ( opt.m_nType == OPT_CHOICE && !V_strcmp( opt.m_pszCvar, "vita_vehicle_buttons" ) )
+		return V_stricmp( COM_GetModDirectory(), "portal" ) != 0;	// no vehicles
 	if ( opt.m_nType != OPT_BIND || V_stricmp( COM_GetModDirectory(), "portal" ) )
 		return true;
 	static const char *s_pszNotInPortal[] = { "+reload", "+speed", "impulse 100", "+zoom", "invnext", "invprev", "lastinv", "phys_swap" };
@@ -1390,6 +1433,7 @@ static const char *s_pszVitaSavedCvars[] =
 	"skill", "closecaption", "cc_subtitles", "crosshair", "volume", "snd_musicvolume", "cl_showfps",
 	"r_flex", "r_vita_flex_dist", "joy_yawsensitivity", "joy_pitchsensitivity", "joy_inverty",
 	"vita_staticprop_minpixels", "vita_hud_size", "vita_fire_smoke", "vita_gyro", "vita_gyro_sensitivity",
+	"vita_look_accel", "fov_desired", "vita_vehicle_buttons",
 };
 
 // The remappable buttons (START stays the menu button)
@@ -1775,7 +1819,8 @@ protected:
 		if ( nId != CONFIRM_RESET )
 			return;
 		// the stock layout under the port's binds, without the saved layout
-		g_pFullFileSystem->RemoveFile( "cfg/vita_controls.cfg", "MOD" );
+		if ( g_pFullFileSystem->FileExists( "cfg/vita_controls.cfg", "MOD" ) )
+			g_pFullFileSystem->RemoveFile( "cfg/vita_controls.cfg", "MOD" );
 		engine->ExecuteClientCmd( "exec 360controller.cfg\nvita_binds\n" );
 		m_bControlsChanged = false;
 		Refresh();
@@ -2022,6 +2067,399 @@ private:
 };
 
 //-----------------------------------------------------------------------------
+// PREPARE SHADERS (main menu, not in a level): compiles every shader the
+// game's materials can use into the shader cache, as 0.1.0 did for each map
+// as it loaded, so play never pauses to compile one. materialsystem does the
+// work (VitaPrepareShaders, common/vita/vita_prepare_shaders.h), a slice
+// each frame so this screen keeps drawing and circle can stop it
+//-----------------------------------------------------------------------------
+static VitaPrepareShadersFn_t VitaPrepareFn()
+{
+	static VitaPrepareShadersFn_t s_pfn = (VitaPrepareShadersFn_t)dlsym( RTLD_DEFAULT, "VitaPrepareShaders" );
+	return s_pfn;
+}
+
+// Draws text word-wrapped to wide; returns the height used
+static int VitaDrawWrapped( HFont font, int x, int y, int wide, const char *pszText, Color color )
+{
+	const int lineTall = surface()->GetFontTall( font ) + VS( 2 );
+	int nLines = 0;
+	char szLine[256];
+	int nLine = 0;
+	const char *p = pszText;
+	while ( *p )
+	{
+		// the next word, with the space before it
+		const char *pWordEnd = p;
+		while ( *pWordEnd == ' ' )
+			pWordEnd++;
+		while ( *pWordEnd && *pWordEnd != ' ' && *pWordEnd != '\n' )
+			pWordEnd++;
+		char szTry[256];
+		V_snprintf( szTry, sizeof( szTry ), "%.*s%.*s", nLine, szLine, (int)( pWordEnd - p ), p );
+		if ( nLine && VitaTextWide( font, szTry ) > wide )
+		{
+			VitaDrawText( font, x, y + nLines++ * lineTall, szLine, color );
+			while ( *p == ' ' )
+				p++;
+			nLine = 0;
+			continue;
+		}
+		V_strncpy( szLine, szTry, sizeof( szLine ) );
+		nLine = V_strlen( szLine );
+		p = pWordEnd;
+		if ( *p == '\n' )
+		{
+			VitaDrawText( font, x, y + nLines++ * lineTall, szLine, color );
+			nLine = 0;
+			p++;
+		}
+	}
+	if ( nLine )
+		VitaDrawText( font, x, y + nLines++ * lineTall, szLine, color );
+	return nLines * lineTall;
+}
+
+static void VitaFormatMinutes( char *pszOut, int nOutSize, double flSeconds )
+{
+	const int nMinutes = (int)( flSeconds / 60.0 + 0.5 );
+	if ( nMinutes >= 60 )
+		V_snprintf( pszOut, nOutSize, "%d h %02d min", nMinutes / 60, nMinutes % 60 );
+	else
+		V_snprintf( pszOut, nOutSize, "%d min", MAX( nMinutes, 1 ) );
+}
+
+extern "C" void so_set_long_task( int bActive );	// launcher: the screen may sleep (not the system)
+
+class CVitaPrepareShadersScreen : public CVitaScreen
+{
+	DECLARE_CLASS_SIMPLE( CVitaPrepareShadersScreen, CVitaScreen );
+
+public:
+	CVitaPrepareShadersScreen( Panel *pParent ) : BaseClass( pParent, "VitaPrepareShaders", "PREPARE SHADERS" )
+	{
+		memset( &m_Status, 0, sizeof( m_Status ) );
+		m_flStartTime = m_flEndTime = m_flRunStart = 0.0;
+		m_nStartDone = -1;
+		m_nSamples = 0;
+		if ( VitaPrepareFn() )
+			VitaPrepareFn()( VITA_PREPARE_QUERY, 0, &m_Status );
+		// a run from an earlier visit has stopped or finished: start from the
+		// first view, with the saved progress
+		if ( !IsRunning() )
+			m_Status.nState = VITA_PREPARE_IDLE;
+	}
+
+	virtual ~CVitaPrepareShadersScreen()
+	{
+		// closed while running (the screen is replaced): keep the progress
+		if ( IsRunning() && VitaPrepareFn() )
+			VitaPrepareFn()( VITA_PREPARE_STOP, 0, &m_Status );
+		so_set_long_task( 0 );
+	}
+
+protected:
+	enum { ROW_START, ROW_CONTINUE, ROW_RESTART, ROW_BACK };
+
+	bool IsRunning() const { return m_Status.nState == VITA_PREPARE_FINDING || m_Status.nState == VITA_PREPARE_RUNNING; }
+	bool HasSavedProgress() const { return !m_Status.bSavedComplete && m_Status.nSavedDone > 0 && m_Status.nSavedTotal > 0; }
+
+	virtual void Refresh()
+	{
+		m_Rows.RemoveAll();
+		m_RowAction.RemoveAll();
+		m_Hints.RemoveAll();
+		if ( IsRunning() )
+		{
+			// no rows: a button pressed to wake the screen mustn't stop it
+			const VitaHint_t hints[] = { { VG_CIRCLE, "Hold to stop" } };
+			m_Hints.AddMultipleToTail( 1, hints );
+			return;
+		}
+		if ( !GameUI().IsInLevel() && VitaPrepareFn() && m_Status.nState != VITA_PREPARE_DONE )
+		{
+			if ( HasSavedProgress() )
+			{
+				AddRow( "Continue", ROW_CONTINUE );
+				AddRow( "Start over", ROW_RESTART );
+			}
+			else
+				AddRow( m_Status.bSavedComplete ? "Prepare again" : "Start", ROW_START );
+		}
+		AddRow( "Back", ROW_BACK );
+		const VitaHint_t hints[] = { { VG_CROSS, "Select" }, { VG_CIRCLE, "Back" } };
+		m_Hints.AddMultipleToTail( 2, hints );
+	}
+
+	void AddRow( const char *pszLabel, int nAction )
+	{
+		VitaRow_t &row = m_Rows[m_Rows.AddToTail()];
+		row.m_Label = pszLabel;
+		m_RowAction.AddToTail( nAction );
+	}
+
+	void Begin( int nCommand )
+	{
+		VitaPrepareFn()( nCommand, 0, &m_Status );
+		m_flStartTime = Plat_FloatTime();
+		m_flEndTime = 0.0;
+		m_nStartDone = -1;
+		m_nSamples = 0;
+		if ( IsRunning() )
+			so_set_long_task( 1 );
+		Refresh();
+		SetSelection( 0 );
+	}
+
+	// stopped or finished: the saved progress, the rows for what's next
+	void Ended()
+	{
+		so_set_long_task( 0 );
+		m_flEndTime = Plat_FloatTime();
+		VitaPrepareFn()( VITA_PREPARE_QUERY, 0, &m_Status );
+		Refresh();
+		SetSelection( 0 );
+	}
+
+	virtual void OnActivateRow( int nRow )
+	{
+		if ( !m_RowAction.IsValidIndex( nRow ) )
+			return;
+		switch ( m_RowAction[nRow] )
+		{
+		case ROW_START:
+			Begin( m_Status.bSavedComplete ? VITA_PREPARE_RESTART : VITA_PREPARE_START );
+			break;
+		case ROW_CONTINUE:
+			Begin( VITA_PREPARE_START );
+			break;
+		case ROW_RESTART:
+			Begin( VITA_PREPARE_RESTART );
+			break;
+		default:
+			Close();
+			break;
+		}
+	}
+
+	virtual void OnBack()
+	{
+		VitaPlaySound( "UI/buttonclickrelease.wav" );
+		if ( IsRunning() )
+		{
+			VitaPrepareFn()( VITA_PREPARE_STOP, 0, &m_Status );
+			Ended();
+		}
+		else
+			Close();
+	}
+
+	virtual void OnThink()
+	{
+		BaseClass::OnThink();
+		if ( !IsRunning() )
+			return;
+		// a slice of work per frame; a frame also ends with the shader compile
+		// under way, up to a few seconds, so stopping wants circle held
+		VitaPrepareFn()( VITA_PREPARE_STEP, 150000, &m_Status );
+		const double flNow = Plat_FloatTime();
+		if ( m_Status.nState == VITA_PREPARE_RUNNING )
+		{
+			if ( m_nStartDone < 0 )
+			{
+				m_nStartDone = m_Status.nMaterialsDone;
+				m_flRunStart = flNow;
+			}
+			// for the time left: progress every 20 s, the last 10 minutes kept
+			if ( !m_nSamples || flNow - m_Samples[( m_nSamples - 1 ) % VITA_PREPARE_SAMPLES].flTime >= 20.0 )
+			{
+				Sample_t &sample = m_Samples[m_nSamples++ % VITA_PREPARE_SAMPLES];
+				sample.flTime = flNow;
+				sample.nDone = m_Status.nMaterialsDone;
+			}
+		}
+		if ( !IsRunning() )
+		{
+			if ( m_Status.nState == VITA_PREPARE_DONE )
+				VitaPlaySound( "UI/buttonclick.wav" );
+			const int nEndState = m_Status.nState;
+			const VitaPrepareStatus_t run = m_Status;
+			Ended();
+			// keep this run's figures for the view (QUERY refreshed only the saved ones)
+			m_Status.nState = nEndState;
+			m_Status.nMaterialsDone = run.nMaterialsDone;
+			m_Status.nMaterialsTotal = run.nMaterialsTotal;
+			m_Status.nShadersCreated = run.nShadersCreated;
+			m_Status.nShadersFailed = run.nShadersFailed;
+			Refresh();
+			SetSelection( 0 );
+		}
+	}
+
+	virtual int HeaderTall() const { return VS( 200 ); }
+
+	virtual void PaintHeader( int x, int y, int wide )
+	{
+		HFont small = VitaFont( VITA_FONT_SMALL );
+		HFont item = VitaFont( VITA_FONT_ITEM );
+		const Color text( 220, 220, 220, 255 ), dim( 160, 160, 160, 255 ), accent( 255, 176, 0, 255 );
+
+		if ( GameUI().IsInLevel() )
+		{
+			VitaDrawWrapped( item, x, y, wide, "Return to the main menu first: shaders are prepared from there, with no game running.", text );
+			return;
+		}
+		if ( !VitaPrepareFn() )
+		{
+			VitaDrawWrapped( item, x, y, wide, "Not available in this build.", text );
+			return;
+		}
+
+		if ( m_Status.nState == VITA_PREPARE_IDLE )
+		{
+			// before starting: what it does, how long it takes
+			y += VitaDrawWrapped( small, x, y, wide,
+				"Compiles every shader the game's materials can use, ahead of time, so the game no longer pauses the "
+				"first time an effect or area appears.", text ) + VS( 6 );
+			y += VitaDrawWrapped( small, x, y, wide,
+				"This takes about 20 minutes the first time, and a few minutes if run again. Keep the Vita plugged in "
+				"and leave the game on this screen. The screen may dim or turn off to save power while the work "
+				"carries on: press a direction button to check on it.", accent ) + VS( 6 );
+			y += VitaDrawWrapped( small, x, y, wide,
+				"To stop, hold the circle button until it responds (it can take a few seconds). Everything finished is "
+				"kept, and Continue picks up from there. An estimate of the time left appears after a few minutes.", text ) + VS( 10 );
+			if ( m_Status.bSavedComplete )
+				PaintDoneLine( x, y, wide, m_Status.nSavedSkipped );
+			else if ( HasSavedProgress() )
+				PaintProgress( x, y, wide, m_Status.nSavedDone, m_Status.nSavedTotal, "Progress so far: Materials" );
+			return;
+		}
+
+		if ( m_Status.nState == VITA_PREPARE_FINDING )
+		{
+			y += VitaDrawWrapped( item, x, y, wide, "Finding the game's materials...", text ) + VS( 10 );
+			PaintBar( x, y, wide, 0.0f );
+			return;
+		}
+		if ( m_Status.nState == VITA_PREPARE_STOPPED )
+		{
+			y += VitaDrawWrapped( item, x, y, wide, "Stopped. Progress is kept: choose Continue to carry on.", text ) + VS( 10 );
+			if ( m_Status.nSavedTotal > 0 )
+				y = PaintProgress( x, y, wide, m_Status.nSavedDone, m_Status.nSavedTotal, "Materials" );
+		}
+		else if ( m_Status.nState == VITA_PREPARE_DONE )
+		{
+			y += PaintDoneLine( x, y, wide, m_Status.nSavedSkipped ) + VS( 10 );
+			y = PaintProgress( x, y, wide, m_Status.nMaterialsTotal, m_Status.nMaterialsTotal, "Materials" );
+		}
+		else
+		{
+			y += VitaDrawWrapped( item, x, y, wide, "Preparing shaders. Keep the Vita plugged in.", text ) + VS( 10 );
+			y = PaintProgress( x, y, wide, m_Status.nMaterialsDone, m_Status.nMaterialsTotal, "Materials" );
+		}
+
+		char szLine[160];
+		if ( m_Status.nShadersFailed )
+			V_snprintf( szLine, sizeof( szLine ), "Shaders done this run: %d (%d failed)", m_Status.nShadersCreated, m_Status.nShadersFailed );
+		else
+			V_snprintf( szLine, sizeof( szLine ), "Shaders done this run: %d", m_Status.nShadersCreated );
+		VitaDrawText( small, x, y, szLine, text );
+		y += surface()->GetFontTall( small ) + VS( 4 );
+
+		if ( m_flStartTime > 0.0 )
+		{
+			char szElapsed[32], szLeft[32];
+			const double flNow = Plat_FloatTime();
+			VitaFormatMinutes( szElapsed, sizeof( szElapsed ), ( m_flEndTime > 0.0 ? m_flEndTime : flNow ) - m_flStartTime );
+			if ( m_Status.nState == VITA_PREPARE_RUNNING )
+			{
+				const double flRate = RecentRate( flNow );	// materials a second
+				if ( flRate > 0.0 )
+				{
+					VitaFormatMinutes( szLeft, sizeof( szLeft ), ( m_Status.nMaterialsTotal - m_Status.nMaterialsDone ) / flRate );
+					V_snprintf( szLine, sizeof( szLine ), "Time: %s so far, about %s left", szElapsed, szLeft );
+				}
+				else
+					V_snprintf( szLine, sizeof( szLine ), "Time: %s so far, estimating what's left...", szElapsed );
+			}
+			else
+				V_snprintf( szLine, sizeof( szLine ), "Time: %s", szElapsed );
+			VitaDrawText( small, x, y, szLine, text );
+			y += surface()->GetFontTall( small ) + VS( 4 );
+		}
+
+		if ( m_Status.nState == VITA_PREPARE_RUNNING && m_Status.szCurrent[0] )
+			VitaDrawText( small, x, y, m_Status.szCurrent, dim );
+	}
+
+	// materials a second over the last ten minutes (after a few minutes of
+	// this run), since their cost changes a lot from folder to folder
+	double RecentRate( double flNow ) const
+	{
+		if ( m_nStartDone < 0 || flNow - m_flRunStart < 180.0 || m_nSamples < 2 )
+			return 0.0;
+		const int nOldest = m_nSamples > VITA_PREPARE_SAMPLES ? m_nSamples - VITA_PREPARE_SAMPLES : 0;
+		const Sample_t &first = m_Samples[nOldest % VITA_PREPARE_SAMPLES];
+		const double flSpan = flNow - first.flTime;
+		const int nDone = m_Status.nMaterialsDone - first.nDone;
+		return ( flSpan > 60.0 && nDone > 0 ) ? nDone / flSpan : 0.0;
+	}
+
+	int PaintDoneLine( int x, int y, int wide, int nSkipped )
+	{
+		HFont item = VitaFont( VITA_FONT_ITEM );
+		if ( !nSkipped && m_Status.nState == VITA_PREPARE_DONE )
+			return VitaDrawWrapped( VitaFont( VITA_FONT_SMALL ), x, y, wide,
+				"All shaders are prepared. Restart the game before playing: preparing used memory the game needs.", Color( 255, 176, 0, 255 ) );
+		if ( !nSkipped )
+			return VitaDrawWrapped( item, x, y, wide, "All shaders are prepared.", Color( 255, 176, 0, 255 ) );
+		char szText[200];
+		V_snprintf( szText, sizeof( szText ), "Done, but %d material%s skipped: the game closed while preparing %s. "
+			"Prepare again to include %s.", nSkipped, nSkipped == 1 ? " was" : "s were", nSkipped == 1 ? "it" : "them", nSkipped == 1 ? "it" : "them" );
+		return VitaDrawWrapped( VitaFont( VITA_FONT_SMALL ), x, y, wide, szText, Color( 255, 176, 0, 255 ) );
+	}
+
+	void PaintBar( int x, int y, int wide, float flFraction )
+	{
+		const int barTall = VS( 14 );
+		surface()->DrawSetColor( 255, 255, 255, 48 );
+		surface()->DrawFilledRect( x, y, x + wide, y + barTall );
+		surface()->DrawSetColor( 255, 176, 0, 230 );
+		surface()->DrawFilledRect( x, y, x + (int)( wide * clamp( flFraction, 0.0f, 1.0f ) ), y + barTall );
+	}
+
+	// the bar and "<label>: (done/total Complete)"; returns the y below them
+	int PaintProgress( int x, int y, int wide, int nDone, int nTotal, const char *pszLabel )
+	{
+		HFont item = VitaFont( VITA_FONT_ITEM );
+		const float flFraction = nTotal > 0 ? (float)nDone / nTotal : 0.0f;
+		PaintBar( x, y, wide, flFraction );
+		y += VS( 14 ) + VS( 6 );
+		char szTicker[128];
+		V_snprintf( szTicker, sizeof( szTicker ), "%s: (%d/%d Complete)  %d%%", pszLabel, nDone, nTotal, (int)( flFraction * 100.0f ) );
+		VitaDrawText( item, x, y, szTicker, Color( 255, 255, 255, 255 ) );
+		return y + surface()->GetFontTall( item ) + VS( 6 );
+	}
+
+private:
+	enum { VITA_PREPARE_SAMPLES = 31 };	// 20 s apart: ten minutes
+	struct Sample_t
+	{
+		double flTime;
+		int nDone;
+	};
+
+	VitaPrepareStatus_t m_Status;
+	CUtlVector< int > m_RowAction;
+	double m_flStartTime;
+	double m_flEndTime;
+	double m_flRunStart;
+	int m_nStartDone;
+	Sample_t m_Samples[VITA_PREPARE_SAMPLES];
+	int m_nSamples;
+};
+
+//-----------------------------------------------------------------------------
 // Entry points (CBasePanel::RunMenuCommand)
 //-----------------------------------------------------------------------------
 void VitaMenu_OpenNewGame( Panel *pParent )
@@ -2047,4 +2485,9 @@ void VitaMenu_OpenOptions( Panel *pParent )
 void VitaMenu_OpenQuit( Panel *pParent )
 {
 	( new CVitaQuitScreen( pParent ) )->Open();
+}
+
+void VitaMenu_OpenPrepareShaders( Panel *pParent )
+{
+	( new CVitaPrepareShadersScreen( pParent ) )->Open();
 }

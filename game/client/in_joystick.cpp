@@ -114,6 +114,10 @@ static ConVar vita_gyro( "vita_gyro", "0", FCVAR_ARCHIVE, "Vita: gyro aiming: tu
 static ConVar vita_gyro_sensitivity( "vita_gyro_sensitivity", "1.5", FCVAR_ARCHIVE,
 	"Vita: gyro aiming sensitivity: 1 turns the view as far as the Vita turned, 2 twice as far", true, 0.25f, true, 5.0f );
 extern "C" int so_gyro_rates( float *pYaw, float *pPitch );	// launcher: the Vita's turn and tilt rates, rad/s
+// Look acceleration (Options > Controls, GitHub issue #11): off, the view
+// turns in proportion to how far the stick is pushed, without the slow
+// low range and the speed-up that ramps in past it
+static ConVar vita_look_accel( "vita_look_accel", "1", FCVAR_ARCHIVE, "Vita: look acceleration on the right stick (1, stock) or a straight response (0)" );
 #endif
 
 extern ConVar lookspring;
@@ -447,6 +451,10 @@ static float ResponseCurveLookAccelerated( float x, int axis, float otherAxis, f
 //-----------------------------------------------
 static float ResponseCurveLook( int curve, float x, int axis, float otherAxis, float dist, float frametime )
 {
+#ifdef PLATFORM_VITA
+	if ( !vita_look_accel.GetBool() )
+		return x * AutoAimDampening( x, axis, dist );
+#endif
 	switch( curve )
 	{
 	case 1://Promotion of acceleration

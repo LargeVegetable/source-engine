@@ -20,7 +20,13 @@
 
 // default FOV for HL2
 ConVar default_fov( "default_fov", "75", FCVAR_CHEAT );
+#ifdef PLATFORM_VITA
+// down to 55 on the Vita (Options > Video, GitHub issue #10): on its small
+// wide screen 75, the PC minimum, looks very wide
+ConVar fov_desired( "fov_desired", "75", FCVAR_ARCHIVE | FCVAR_USERINFO, "Sets the base field-of-view.", true, 55.0, true, 110.0 );
+#else
 ConVar fov_desired( "fov_desired", "75", FCVAR_ARCHIVE | FCVAR_USERINFO, "Sets the base field-of-view.", true, 75.0, true, 110.0 );
+#endif
 
 // The current client mode. Always ClientModeNormal in HL.
 IClientMode *g_pClientMode = NULL;

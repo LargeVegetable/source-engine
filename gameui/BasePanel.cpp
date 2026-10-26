@@ -1683,6 +1683,14 @@ CGameMenu *CBasePanel::RecursiveLoadGameMenu(KeyValues *datafile)
 		// achievements need Steam
 		if ( cmd && !Q_stricmp( cmd, "OpenAchievementsDialog" ) )
 			continue;
+		// the port's PREPARE SHADERS (VitaMenu.cpp), before Quit, at the main
+		// menu only (notsingle hides it in a level)
+		if ( cmd && !Q_stricmp( cmd, "Quit" ) )
+		{
+			KeyValues *pFlags = new KeyValues( "VitaPrepareShaders", "notsingle", 1 );
+			menu->AddMenuItem( "VitaPrepareShaders", "PREPARE SHADERS", "VitaPrepareShaders", this, pFlags );
+			pFlags->deleteThis();
+		}
 #endif
 
 		menu->AddMenuItem(name, label, cmd, this, dat);
@@ -2110,6 +2118,11 @@ void CBasePanel::RunMenuCommand(const char *command)
 	if ( !Q_stricmp( command, "Quit" ) )
 	{
 		VitaMenu_OpenQuit( this );
+		return;
+	}
+	if ( !Q_stricmp( command, "VitaPrepareShaders" ) )
+	{
+		VitaMenu_OpenPrepareShaders( this );
 		return;
 	}
 #endif

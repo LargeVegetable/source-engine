@@ -19,7 +19,13 @@
 
 extern bool g_bRollingCredits;
 
+#ifdef PLATFORM_VITA
+// down to 55 on the Vita (Options > Video, GitHub issue #10): on its small
+// wide screen 75, the PC minimum, looks very wide
+ConVar fov_desired( "fov_desired", "75", FCVAR_ARCHIVE | FCVAR_USERINFO, "Sets the base field-of-view.", true, 55.0, true, 110.0 );
+#else
 ConVar fov_desired( "fov_desired", "75", FCVAR_ARCHIVE | FCVAR_USERINFO, "Sets the base field-of-view.", true, 75.0, true, 110.0 );
+#endif
 
 //-----------------------------------------------------------------------------
 // Globals

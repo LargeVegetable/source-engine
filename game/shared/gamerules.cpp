@@ -859,7 +859,11 @@ void CGameRules::ClientSettingsChanged( CBasePlayer *pPlayer )
 	if ( pszFov )
 	{
 		int iFov = atoi(pszFov);
+#ifdef PLATFORM_VITA
+		iFov = clamp( iFov, 55, 110 );	// fov_desired's range on the Vita (client clientmode_hlnormal.cpp)
+#else
 		iFov = clamp( iFov, 75, 110 );
+#endif
 		pPlayer->SetDefaultFOV( iFov );
 	}
 

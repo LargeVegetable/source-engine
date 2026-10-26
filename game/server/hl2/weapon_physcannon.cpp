@@ -718,6 +718,21 @@ QAngle CGrabController::TransformAnglesFromPlayerSpace( const QAngle &anglesIn, 
 }
 
 
+#ifdef PLATFORM_VITA
+// Vita: small, light props don't collide with each other (physics.cpp,
+// vita_physics_small_props), judged by their mass, which picking up sets to
+// a few kg and dropping restores. IVP keeps collision pairs from the
+// filter's earlier answers, so a change has to be announced: a pair it no
+// longer wanted was deleted during an impact, and the hull lists broke.
+// Not from inside a physics callback, where rechecking is unsafe
+static void VitaMassChangedCollisionRules( CBaseEntity *pEntity )
+{
+	extern bool PhysIsInCallback();
+	if ( pEntity && !PhysIsInCallback() )
+		pEntity->CollisionRulesChanged();
+}
+#endif
+
 void CGrabController::AttachEntity( CBasePlayer *pPlayer, CBaseEntity *pEntity, IPhysicsObject *pPhys, bool bIsMegaPhysCannon, const Vector &vGrabPosition, bool bUseGrabPosition )
 {
 	// play the impact sound of the object hitting the player
@@ -783,6 +798,9 @@ void CGrabController::AttachEntity( CBasePlayer *pPlayer, CBaseEntity *pEntity, 
 	// Give extra mass to the phys object we're actually picking up
 	pPhys->SetMass( REDUCED_CARRY_MASS );
 	pPhys->EnableDrag( false );
+#ifdef PLATFORM_VITA
+	VitaMassChangedCollisionRules( pEntity );
+#endif
 
 	m_errorTime = bIsMegaPhysCannon ? -1.5f : -1.0f; // 1 seconds until error starts accumulating
 	m_error = 0;
@@ -856,6 +874,10 @@ void CGrabController::DetachEntity( bool bClearVelocity )
 			pPhys->SetMass( m_savedMass[i] );
 			pPhys->SetDamping( NULL, &m_savedRotDamping[i] );
 			PhysClearGameFlags( pPhys, FVPHYSICS_PLAYER_HELD );
+#ifdef PLATFORM_VITA
+			if ( i == count - 1 )
+				VitaMassChangedCollisionRules( pEntity );
+#endif
 			if ( bClearVelocity )
 			{
 				PhysForceClearVelocity( pPhys );

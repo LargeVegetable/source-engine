@@ -75,11 +75,13 @@ arm-vita-eabi-gcc $CFLAGS -c "$OUT/exports.S" -o "$OUT/exports.o"
 # everything the modules import comes from here; see gen_exports.py
 # --wrap: SDL's vitaGL init goes through the launcher, see main.cpp;
 # sem_destroy: pthread-embedded's sleeps 1 ms every time; malloc & co: large
-# blocks get their own arena, failures are logged; see so_loader.cpp
+# blocks get their own arena, failures are logged; pthread_mutex_lock,
+# pthread_cond_timedwait, usleep: noted for hang reports; see so_loader.cpp
 link_launcher() {
 	arm-vita-eabi-g++ $CFLAGS "$@" -Wl,-q -Wl,--no-enum-size-warning -Wl,--wrap=vglInitExtended -Wl,--wrap=sceClibPrintf -Wl,--wrap=vglSwapBuffers \
 		-Wl,--wrap=sem_destroy -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=memalign \
 		-Wl,--wrap=free -Wl,--wrap=malloc_usable_size -Wl,--wrap=mallinfo -Wl,--wrap=setvbuf \
+		-Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_cond_timedwait -Wl,--wrap=usleep \
 		"$OUT/main.o" "$OUT/so_loader.o" "$OUT/vita_stubs.o" "$OUT/vita_iconv.o" "$OUT/exports.o" \
 		-o "$OUT/$NAME.elf" $VITAGL_LDFLAGS \
 		-Wl,--start-group \
@@ -89,7 +91,7 @@ link_launcher() {
 		-lkubridge_stub_weak -lSceVshBridge_stub -ltaihen_stub -lSceShaccCg_stub \
 		-lSceAppMgr_stub -lSceAppUtil_stub -lSceAudio_stub -lSceAudioIn_stub \
 		-lSceCommonDialog_stub -lSceCtrl_stub -lSceDisplay_stub -lSceGxm_stub \
-		-lSceHid_stub -lSceIme_stub -lSceKernelDmacMgr_stub -lSceKernelThreadMgr_stub \
+		-lSceHid_stub -lSceIme_stub -lSceKernelDmacMgr_stub -lSceKernelModulemgr_stub -lSceKernelThreadMgr_stub \
 		-lSceLibKernel_stub -lSceMotion_stub -lSceNet_stub -lSceNetCtl_stub \
 		-lScePower_stub -lSceRtc_stub -lSceSysmodule_stub -lSceTouch_stub \
 		-Wl,--end-group

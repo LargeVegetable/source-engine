@@ -1157,7 +1157,12 @@ void CBaseEntity::VPhysicsUpdate( IPhysicsObject *pPhysics )
 				{
 					Warning( "Ignoring bogus angles (%f,%f,%f) from vphysics! (entity %s)\n", angles.x, angles.y, angles.z, GetDebugName() );
 				}
+#ifdef PLATFORM_VITA
+				// the last good ones, not (0,0,0), unless those are bad too
+				angles = IsEntityQAngleReasonable( GetAbsAngles() ) ? GetAbsAngles() : vec3_angle;
+#else
 				angles = vec3_angle;
+#endif
 			}
 #ifndef CLIENT_DLL 
 			Vector prevOrigin = GetAbsOrigin();

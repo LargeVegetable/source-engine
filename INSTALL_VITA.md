@@ -71,7 +71,8 @@ See VitaShell's own instructions for the buttons.
 
 ## 6. Play
 
-- **Expect hitches the first time you see new things:** the game compiles each shader on the Vita the first time it's drawn, and in the first minutes that can freeze the picture for several seconds. It isn't a crash; let it carry on. The compiled shaders are kept in `ux0:data/shader_cache/`, so it only happens once.
+- **Recommended: choose Prepare shaders in the main menu before you play.** It compiles every shader the game uses ahead of time, about 20 minutes the first time; keep the Vita plugged in, and restart the game when it's done. You can stop it with ○ (held) and continue later.
+- Otherwise, expect hitches the first time you see new things: the game compiles each shader the first time it's drawn, which can freeze the picture for a moment, or several seconds early on. It isn't a crash; let it carry on. Compiled shaders are kept in `ux0:data/shader_cache/`, so each only happens once.
 - Your saves are in `ux0:data/halflife2/hl2/save/` and your settings in `ux0:data/halflife2/hl2/cfg/`.
 - Controls and settings: see [README_VITA.md](README_VITA.md).
 

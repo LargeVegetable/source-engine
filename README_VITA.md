@@ -4,7 +4,7 @@ An unofficial port of the Source engine to the PlayStation Vita that runs **Half
 
 **No game files are included.** You need Half-Life 2 on Steam and you copy its files to your Vita yourself: see **[INSTALL_VITA.md](INSTALL_VITA.md)**.
 
-**Version 0.1.1-beta.** [Download it from the releases page](../../releases/latest).
+**Version 0.1.2-beta.** [Download it from the releases page](../../releases/latest).
 
 ## Status
 
@@ -16,7 +16,11 @@ An unofficial port of the Source engine to the PlayStation Vita that runs **Half
 ## Features
 
 - Menus made for the Vita: new game by chapter, save and load with screenshots, and options in tabs for controls, game, audio and video. Use the buttons or tap.
-- Every action can be remapped, including to the D-pad, SELECT, and the left and right halves of both the rear touchpad and the touchscreen. Look sensitivity and invert look too.
+- **Prepare shaders** in the main menu: compiles every shader the game uses ahead of time (about 20 minutes the first time), so play doesn't pause the first time something new appears.
+- All chapters can be unlocked from New Game (△).
+- Every action can be remapped, including to the D-pad, SELECT, and the left and right halves of both the rear touchpad and the touchscreen. Look sensitivity, look acceleration and invert look too.
+- Field of view from 55 to 90 (Options > Video).
+- Optional button driving for the airboat and the buggy: ✕ accelerates, ○ reverses (Options > Controls).
 - Facial animation and lip sync, with a distance setting for performance.
 - A larger HUD (three sizes) and PlayStation button symbols in on-screen hints.
 - Video options for the heavy effects: distant small props, and the smoke above fires.
@@ -58,9 +62,13 @@ The touchscreen halves work as buttons only in game; in the menus you tap as usu
 
 **Gyro aiming** is off by default: turn it on in Options > Controls. Turning the Vita left or right turns the view, and tilting it looks up or down, on top of the right stick. At sensitivity 1 the view turns as far as the Vita does.
 
+**Vehicle controls** in Options > Controls: set to **Cross & circle**, ✕ accelerates and ○ brakes and reverses in the airboat and the buggy, alongside the left stick, which still steers. The handbrake then moves to the rear touchpad's left half.
+
+**Look acceleration** (Options > Controls) is on by default: the view turns slowly over most of the stick's travel, then speeds up the longer it's pushed all the way. Turned off, the view turns in proportion to how far the stick is pushed.
+
 On a PS TV there's no rear touchpad, touchscreen or gyro, so move Crouch to another button in Options > Controls.
 
-In the menus: D-pad or left stick to move, ✕ to select, ○ to go back, L and R to switch tabs, △ to delete a save.
+In the menus: D-pad or left stick to move, ✕ to select, ○ to go back, L and R to switch tabs, △ to delete a save or, in New Game, to unlock all chapters.
 
 ## Settings
 
@@ -71,12 +79,12 @@ The Options menu covers the usual settings. Two files cover the rest:
 
 ## Performance notes
 
-- **The first time something is drawn, the game briefly hitches:** it compiles that shader on the Vita, which takes about half a second to a second each. Early on, and in each new area, that can add up to pauses of several seconds. The compiled shaders are kept in `ux0:data/shader_cache/`, so it only happens once.
+- **Shaders are compiled on the Vita, about half a second to a second each.** Choose **Prepare shaders** in the main menu to compile them all ahead of time: about 20 minutes the first time (keep the Vita plugged in), a few minutes if run again, and it can be stopped and continued. Restart the game afterwards. Without it, the game compiles each shader the first time it's drawn, which hitches briefly, early on and in each new area. Compiled shaders are kept in `ux0:data/shader_cache/` either way.
 - Physics-heavy moments (many objects tumbling at once) can still hitch briefly.
 
 ## Known issues
 
-- Rarely, the game can crash while loading the next map (seen once, on the way into Highway 17; the same transition then loaded fine). Save often, and if it happens, please report it with the logs below.
+- Rarely, the game can crash or stop responding while loading the next map. Save often, and if it happens, please report it with the logs below.
 - Reflections and specular highlights from cube maps are off: vitaGL doesn't support mipmapped cube maps yet.
 - The intro videos don't play.
 - Suspending and resuming (pressing PS mid-game, or putting the Vita to sleep) hasn't been tested much. Save before you do.

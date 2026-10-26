@@ -42,6 +42,8 @@ void so_exit_process( int code );
 void so_set_gl_ready( void );	// vitaGL is up (glFinish is safe)
 void so_set_menus_visible( int bVisible );	// engine, each frame
 int so_menus_visible( void );	// shaderapidx9: per-frame dynamic buffer discard
+void so_set_long_task( int bActive );	// GameUI: a long task, the screen may sleep (not the system)
+int so_long_task( void );
 int so_gyro_rates( float *pYaw, float *pPitch );	// client gyro aiming: rad/s, 0 if unavailable
 // Load checkpoints (engine, GameUI): the time, and the shader compiles and
 // their seconds since the previous checkpoint
@@ -89,6 +91,15 @@ void so_perf_add( int counter, uint64_t start_us, uint64_t amount );
 void so_perf_log( void );
 // Adds the calling thread to the threads: line (CPU time, core, preemptions)
 void so_thread_register( const char *name );
+// Names the calling thread in hang reports (copied)
+void so_thread_name( const char *name );
+// Every second from the main loop: logs what each thread waits on, with its
+// stack, once nothing has moved for a while
+void so_hang_check( void );
+// Shader record (testing builds): see so_loader.cpp
+void so_shader_record_start( const char *path, const char *header );
+void so_shader_record( int bVertex, const char *pName, int nStatic, int nDynamic, unsigned nMicroseconds, int bFailed );
+void so_shader_record_flush( void );
 
 // Named sections (engine and client; any thread), logged with so_perf_log as
 // ms per second, largest first. The name is "prefix name" (either may be

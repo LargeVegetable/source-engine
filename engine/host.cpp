@@ -1761,11 +1761,30 @@ CON_COMMAND( vita_binds, "Vita: the port's controller binds (R fire, L alt fire,
 }
 
 // A layout saved by an early build has circle on the debug screenshot
-CON_COMMAND( vita_binds_fixup, "Vita: moves circle off the old debug screenshot bind (run by vita_binds)" )
+CON_COMMAND( vita_binds_fixup, "Vita: moves circle off the old debug screenshot bind, and buttons off the multiplayer scoreboard (run by vita_binds)" )
 {
 	const char *pszCircle = Key_BindingForKey( KEY_XBUTTON_B );
 	if ( pszCircle && !V_stricmp( pszCircle, "vita_screenshot" ) )
 		Cbuf_InsertText( "bind B_BUTTON +reload\n" );
+	// Layouts saved under 0.1.0 can hold Valve's Linux pad binds, which that
+	// version ran after the port's: triangle on togglescores and the rear
+	// touchpad's left half on voicemenu, multiplayer commands ("Unknown
+	// command" in single player). Back to the defaults
+	static const ButtonCode_t s_VitaButtons[] = { KEY_XBUTTON_A, KEY_XBUTTON_B, KEY_XBUTTON_X, KEY_XBUTTON_Y,
+		KEY_XBUTTON_LEFT_SHOULDER, KEY_XBUTTON_RIGHT_SHOULDER, KEY_XBUTTON_BACK, KEY_XBUTTON_STICK1, KEY_XBUTTON_STICK2 };
+	const bool bPortal = !V_stricmp( COM_GetModDirectory(), "portal" );
+	for ( int i = 0; i < ARRAYSIZE( s_VitaButtons ); i++ )
+	{
+		const char *pszBind = Key_BindingForKey( s_VitaButtons[i] );
+		if ( !pszBind || ( V_stricmp( pszBind, "togglescores" ) && V_stricmp( pszBind, "+showscores" ) && V_stricmp( pszBind, "voicemenu" ) ) )
+			continue;
+		const char *pszDefault = "";
+		if ( s_VitaButtons[i] == KEY_XBUTTON_Y && !bPortal )
+			pszDefault = "impulse 100";
+		else if ( s_VitaButtons[i] == KEY_XBUTTON_STICK1 )
+			pszDefault = "+duck";
+		Key_SetBinding( s_VitaButtons[i], pszDefault );
+	}
 }
 
 CON_COMMAND( vita_maptour, "Vita: visit each map in vita_maptour_maps for vita_maptour_seconds (memory/fps check)" )
@@ -4858,7 +4877,15 @@ bool Host_Changelevel( bool loadfromsavedgame, const char *mapname, const char *
 	}
 
 	Warning( "---- Host_Changelevel ----\n" );
+#ifdef PLATFORM_VITA
+	// checkpoints in the boot log up to SpawnServer's "load <map>": a hang
+	// here once stopped after the flush's message with nothing else logged
+	so_load_mark( "changelevel" );
+#endif
 	CheckForFlushMemory( sv.GetMapName(), szMapName );
+#ifdef PLATFORM_VITA
+	so_load_mark( "changelevel: caches flushed" );
+#endif
 
 #if !defined( SWDS )
 	// Always save as an xsave if we're on the X360
@@ -4915,6 +4942,9 @@ bool Host_Changelevel( bool loadfromsavedgame, const char *mapname, const char *
 
 		// ensure resources in the transition volume stay
 		AddTransitionResources( pSaveData, szMapName, startspot );
+#ifdef PLATFORM_VITA
+		so_load_mark( "changelevel: level state saved" );
+#endif
 	}
 #endif
 	g_pServerPluginHandler->LevelShutdown();
@@ -4925,6 +4955,9 @@ bool Host_Changelevel( bool loadfromsavedgame, const char *mapname, const char *
 
 #if !defined(SWDS)
 	saverestore->FinishAsyncSave();
+#endif
+#ifdef PLATFORM_VITA
+	so_load_mark( "changelevel: save files written" );
 #endif
 
 	if ( sv.RestartOnLevelChange() )

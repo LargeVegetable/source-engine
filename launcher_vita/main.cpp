@@ -966,6 +966,17 @@ int main( int argc, char **argv )
 	}
 #endif
 	so_trace( "detailed logs %s", s_bVitaDebug ? "on (-vitadebug)" : "off (add -vitadebug to commandline.txt for them)" );
+	// The shader record, for the prepare-shaders lists: testing builds, or
+	// -vita_record_shaders. Appends across sessions; a header per session
+	bool bRecordShaders = false;
+#ifdef VITA_DEV_BUILD
+	bRecordShaders = true;
+#endif
+	for ( int i = 1; i < s_Args.argc; i++ )
+		if ( !strcmp( s_Args.argv[i], "-vita_record_shaders" ) )
+			bRecordShaders = true;
+	if ( bRecordShaders )
+		so_shader_record_start( VITA_BASE_DIR "/" VITA_FILE_PREFIX "_shader_record.txt", "session " VITA_PORT_VERSION "\n" );
 	// -vita_largeheap <MB>: size of the arena for 256 KB+ blocks, carved out
 	// of the heap above (see so_loader.cpp); 0 keeps one heap
 	unsigned nLargeHeapMB = 72;
@@ -1059,7 +1070,10 @@ int main( int argc, char **argv )
 	// ticks from its event pump)
 	for ( int nTick = 1; !s_bEngineDone; nTick++ )
 	{
-		sceKernelPowerTick( SCE_KERNEL_POWER_TICK_DEFAULT );
+		// a long task (PREPARE SHADERS) lets the screen dim and turn off
+		sceKernelPowerTick( so_long_task() ? SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND : SCE_KERNEL_POWER_TICK_DEFAULT );
+		so_hang_check();
+		so_shader_record_flush();
 		if ( nTick % ( s_bVitaDebug ? 10 : 60 ) == 0 )
 		{
 			so_perf_log();

@@ -70,8 +70,43 @@ static void VitaLockAPC( CPropAPC *pAPC, CFourWheelVehiclePhysics *pPhysics )
 	IPhysicsObject *pBody = pAPC->VPhysicsGetObject();
 	if ( !pBody || !pBody->IsMotionEnabled() || pBody->GetShadowController() )
 		return;
-	if ( pPhysics->GetVehicleOperatingParams().wheelsInContact < 2 && !pBody->IsAsleep() )
-		return;	// still falling after a dropship let go
+	const int nWheels = pPhysics->GetVehicleOperatingParams().wheelsInContact;
+	const int nIndex = pAPC->entindex();
+	static float s_flSkippedSince[MAX_EDICTS];
+	static bool s_bSkipLogged[MAX_EDICTS];
+	static int s_nSerial[MAX_EDICTS];	// the slot's APC: state from another is dropped
+	if ( nIndex > 0 && nIndex < MAX_EDICTS && s_nSerial[nIndex] != pAPC->GetRefEHandle().GetSerialNumber() )
+	{
+		s_nSerial[nIndex] = pAPC->GetRefEHandle().GetSerialNumber();
+		s_flSkippedSince[nIndex] = 0.0f;
+		s_bSkipLogged[nIndex] = false;
+	}
+	if ( nWheels < 2 && !pBody->IsAsleep() )
+	{
+		// still falling after a dropship let go, or off its wheels: one
+		// such APC in Water Hazard went NaN unlocked. Logged once per APC
+		// after 5 s of it
+		if ( nIndex > 0 && nIndex < MAX_EDICTS )
+		{
+			float &flSince = s_flSkippedSince[nIndex];
+			if ( flSince == 0.0f || flSince > gpGlobals->curtime )
+			{
+				flSince = gpGlobals->curtime;
+				s_bSkipLogged[nIndex] = false;
+			}
+			else if ( !s_bSkipLogged[nIndex] && gpGlobals->curtime - flSince > 5.0f )
+			{
+				s_bSkipLogged[nIndex] = true;
+				Vector vecVelocity;
+				pBody->GetVelocity( &vecVelocity, NULL );
+				Msg( "[vita] APC %s not locked for 5 s: %d wheels on the ground, awake, at %.0f %.0f %.0f, speed %.0f\n", pAPC->GetDebugName(),
+					nWheels, pAPC->GetAbsOrigin().x, pAPC->GetAbsOrigin().y, pAPC->GetAbsOrigin().z, vecVelocity.Length() );
+			}
+		}
+		return;
+	}
+	if ( nIndex > 0 && nIndex < MAX_EDICTS )
+		s_flSkippedSince[nIndex] = 0.0f;
 	Vector vecZero( 0.0f, 0.0f, 0.0f );
 	AngularImpulse angNone( 0.0f, 0.0f, 0.0f );
 	pBody->SetVelocity( &vecZero, &angNone );
@@ -79,7 +114,7 @@ static void VitaLockAPC( CPropAPC *pAPC, CFourWheelVehiclePhysics *pPhysics )
 	pPhysics->DisableMotion();	// the wheels
 	static int s_nLogged = 0;
 	if ( s_nLogged++ < 20 )
-		Msg( "[vita] APC %s locked in place\n", pAPC->GetDebugName() );
+		Msg( "[vita] APC %s locked in place (%d wheels on the ground, %s)\n", pAPC->GetDebugName(), nWheels, pBody->IsAsleep() ? "asleep" : "awake" );
 }
 #endif
 

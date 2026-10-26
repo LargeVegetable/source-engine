@@ -3880,6 +3880,14 @@ int D3DToGL::TranslateShader( uint32* code, CUtlBuffer *pBufDisassembledCode, bo
 		// is non-deterministic between runs, and the change in this comment would cause shaders to appear different to the GL disk cache,
 		// significantly increasing app load time.
 		// Other code looks for trans#%d, so we can't just remove it. Instead, output it as 0.
+#ifdef PLATFORM_VITA
+		// The label too: shaders made at material precache carry "<file>
+		// vs-combo N", ones made at first draw (-shadersondemand) none, and
+		// this text is vitaGL's shader cache key, so a cache built in one
+		// mode missed entirely in the other (0.1.0's was useless to 0.1.1).
+		// The same text in both, the one first-draw caches already have
+		debugLabel = NULL;
+#endif
 		V_snprintf( temp, sizeof(temp), "%s trans#%d label:%s\n", "//", 0, debugLabel ? debugLabel : "none" );
 		StrcatToAttribCode( temp );
 	}

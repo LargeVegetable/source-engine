@@ -165,6 +165,14 @@ static FILE *GetDebugFileHandle( void )
 	//
 
 #ifdef PLATFORM_VITA
+// launcher: the first-draw shader record (testing builds) for the prepare
+// step's lists, with each creation's time (translation, then vitaGL's cache
+// read or on-device compile)
+extern "C" uint64_t so_perf_now( void );
+extern "C" void so_shader_record( int bVertex, const char *pName, int nStatic, int nDynamic, unsigned nMicroseconds, int bFailed );
+#endif
+
+#ifdef PLATFORM_VITA
 	// Off on the Vita: the boot preload replayed every pair saved by every
 	// earlier session (107 pairs, 15.7 s at boot, 920 shaders before the first
 	// map; vitaGL had 2048 slots then, 4096 now), and the saved table only
@@ -589,6 +597,14 @@ public:
 	void						FlushShaders();
 	virtual void				ClearVertexAndPixelShaderRefCounts();
 	virtual void				PurgeUnusedVertexAndPixelShaders();
+#ifdef PLATFORM_VITA
+	bool						VitaPrepareLoaded( uint64_t nDeadline, int &nCreated, int &nFailed );
+	void						VitaPurgeUnused();
+	void						VitaPrepareReset();
+	// static combos this run has prepared in full: each batch's purge
+	// destroys shared ones, and they come back as new lookups in the next
+	CUtlRBTree< uint64 >		m_VitaPrepared;
+#endif
 	void						SpewVertexAndPixelShaders();
 	const char					*GetActiveVertexShaderName();
 	const char					*GetActivePixelShaderName();
@@ -634,11 +650,17 @@ private:
 
 		// diff version, valid during load only
 		ShaderDictionaryEntry_t	*m_pComboDictionary;
+#ifdef PLATFORM_VITA
+		int						m_nVitaPrepareNext;	// prepare shaders: the next dynamic combo to create
+#endif
 
 		ShaderLookup_t()
 		{
 			m_Flags = 0;
 			m_nRefCount = 0;
+#ifdef PLATFORM_VITA
+			m_nVitaPrepareNext = 0;
+#endif
 			m_ShaderStaticCombos.m_nCount = 0;
 			m_ShaderStaticCombos.m_pHardwareShaders = 0;
 			m_ShaderStaticCombos.m_pCreationData = 0;
@@ -791,6 +813,9 @@ CShaderManager::CShaderManager() :
 	m_ShaderFileCache( 32 )
 {
 	m_bCreateShadersOnDemand = false;
+#ifdef PLATFORM_VITA
+	m_VitaPrepared.SetLessFunc( DefLessFunc( uint64 ) );
+#endif
 
 #ifdef DYNAMIC_SHADER_COMPILE
 	m_pShaderCompiler30 = 0;
@@ -3284,6 +3309,156 @@ void CShaderManager::PurgeUnusedVertexAndPixelShaders()
 
 
 
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// Prepare shaders (the main menu's PREPARE SHADERS; materialsystem drives it,
+// precaching every material in batches). Every dynamic combo of each static
+// combo loaded so far is created once, which translates it and has vitaGL
+// compile it into its shader cache on disk, and released straight away, so
+// vitaGL's 4096 shader slots never fill: 0.1.0 created them all at material
+// precache and kept them. The text is the same as at first draw (the label
+// is constant, dx9asmtogl2.cpp), so play then reads them from the cache.
+// Combos already created (drawn) are left alone. Returns true while work
+// remains at the deadline
+//-----------------------------------------------------------------------------
+bool CShaderManager::VitaPrepareLoaded( uint64_t nDeadline, int &nCreated, int &nFailed )
+{
+	for ( VertexShader_t v = m_VertexShaderDict.Head(); v != m_VertexShaderDict.InvalidIndex(); v = m_VertexShaderDict.Next( v ) )
+	{
+		ShaderLookup_t &lookup = m_VertexShaderDict[v];
+		ShaderStaticCombos_t &combos = lookup.m_ShaderStaticCombos;
+		if ( ( lookup.m_Flags & SHADER_FAILED_LOAD ) || !combos.m_pHardwareShaders || !combos.m_pCreationData )
+			continue;
+		if ( lookup.m_nVitaPrepareNext >= combos.m_nCount )
+			continue;
+		const uint64 nKey = ( (uint64)(uint32)UtlSymId_t( lookup.m_Name ) << 33 ) | ( (uint64)(uint32)lookup.m_nStaticIndex << 1 ) | 1;
+		if ( lookup.m_nVitaPrepareNext == 0 && m_VitaPrepared.Find( nKey ) != m_VitaPrepared.InvalidIndex() )
+		{
+			lookup.m_nVitaPrepareNext = combos.m_nCount;	// done earlier this run
+			continue;
+		}
+		const char *pName = m_ShaderSymbolTable.String( lookup.m_Name );
+		for ( ; lookup.m_nVitaPrepareNext < combos.m_nCount; lookup.m_nVitaPrepareNext++ )
+		{
+			const int i = lookup.m_nVitaPrepareNext;
+			if ( combos.m_pHardwareShaders[i] != INVALID_HARDWARE_SHADER || !combos.m_pCreationData[i].ByteCode.Count() )
+				continue;
+			if ( so_perf_now() >= nDeadline )
+				return true;
+			HardwareShader_t hShader = CreateD3DVertexShader( ( DWORD * )combos.m_pCreationData[i].ByteCode.Base(), combos.m_pCreationData[i].ByteCode.Count(), pName );
+			if ( hShader == INVALID_HARDWARE_SHADER )
+			{
+				nFailed++;
+				continue;
+			}
+			IDirect3DVertexShader9 *pShader = ( IDirect3DVertexShader9 * )hShader;
+			UnregisterVS( pShader );
+			pShader->Release();
+			nCreated++;
+		}
+		m_VitaPrepared.InsertIfNotFound( nKey );
+	}
+	for ( PixelShader_t p = m_PixelShaderDict.Head(); p != m_PixelShaderDict.InvalidIndex(); p = m_PixelShaderDict.Next( p ) )
+	{
+		ShaderLookup_t &lookup = m_PixelShaderDict[p];
+		ShaderStaticCombos_t &combos = lookup.m_ShaderStaticCombos;
+		if ( ( lookup.m_Flags & SHADER_FAILED_LOAD ) || !combos.m_pHardwareShaders || !combos.m_pCreationData )
+			continue;
+		if ( lookup.m_nVitaPrepareNext >= combos.m_nCount )
+			continue;
+		const uint64 nKey = ( (uint64)(uint32)UtlSymId_t( lookup.m_Name ) << 33 ) | ( (uint64)(uint32)lookup.m_nStaticIndex << 1 ) | 0;
+		if ( lookup.m_nVitaPrepareNext == 0 && m_VitaPrepared.Find( nKey ) != m_VitaPrepared.InvalidIndex() )
+		{
+			lookup.m_nVitaPrepareNext = combos.m_nCount;	// done earlier this run
+			continue;
+		}
+		const char *pName = m_ShaderSymbolTable.String( lookup.m_Name );
+		for ( ; lookup.m_nVitaPrepareNext < combos.m_nCount; lookup.m_nVitaPrepareNext++ )
+		{
+			const int i = lookup.m_nVitaPrepareNext;
+			if ( combos.m_pHardwareShaders[i] != INVALID_HARDWARE_SHADER || !combos.m_pCreationData[i].ByteCode.Count() )
+				continue;
+			if ( so_perf_now() >= nDeadline )
+				return true;
+			HardwareShader_t hShader = CreateD3DPixelShader( ( DWORD * )combos.m_pCreationData[i].ByteCode.Base(), combos.m_pCreationData[i].iCentroidMask,
+				combos.m_pCreationData[i].ByteCode.Count(), pName );
+			if ( hShader == INVALID_HARDWARE_SHADER )
+			{
+				nFailed++;
+				continue;
+			}
+			IDirect3DPixelShader9 *pShader = ( IDirect3DPixelShader9 * )hShader;
+			UnregisterPS( pShader );
+			pShader->Release();
+			nCreated++;
+		}
+		m_VitaPrepared.InsertIfNotFound( nKey );
+	}
+	return false;
+}
+
+// The purge PurgeUnusedVertexAndPixelShaders skips under ToGL (putting
+// shaders back costs too much in play), for the prepare step: static combos
+// no material uses any more, with their bytecode, after each batch.
+// Anything bound stays
+void CShaderManager::VitaPurgeUnused()
+{
+	for ( VertexShader_t v = m_VertexShaderDict.Head(); v != m_VertexShaderDict.InvalidIndex(); )
+	{
+		const VertexShader_t next = m_VertexShaderDict.Next( v );
+		const ShaderStaticCombos_t &combos = m_VertexShaderDict[v].m_ShaderStaticCombos;
+		bool bBound = false;
+		for ( int i = 0; combos.m_pHardwareShaders && i < combos.m_nCount && !bBound; i++ )
+			bBound = combos.m_pHardwareShaders[i] != INVALID_HARDWARE_SHADER && (void *)combos.m_pHardwareShaders[i] == (void *)m_HardwareVertexShader;
+		if ( m_VertexShaderDict[v].m_nRefCount <= 0 && !bBound )
+			DestroyVertexShader( v );
+		v = next;
+	}
+	for ( PixelShader_t p = m_PixelShaderDict.Head(); p != m_PixelShaderDict.InvalidIndex(); )
+	{
+		const PixelShader_t next = m_PixelShaderDict.Next( p );
+		const ShaderStaticCombos_t &combos = m_PixelShaderDict[p].m_ShaderStaticCombos;
+		bool bBound = false;
+		for ( int i = 0; combos.m_pHardwareShaders && i < combos.m_nCount && !bBound; i++ )
+			bBound = combos.m_pHardwareShaders[i] != INVALID_HARDWARE_SHADER && (void *)combos.m_pHardwareShaders[i] == (void *)m_HardwarePixelShader;
+		if ( m_PixelShaderDict[p].m_nRefCount <= 0 && !bBound )
+			DestroyPixelShader( p );
+		p = next;
+	}
+}
+
+// For materialsystem (dlsym): see above
+DLL_EXPORT int VitaShaderPrepareLoaded( uint64_t nDeadline, int *pnCreated, int *pnFailed )
+{
+	int nCreated = 0, nFailed = 0;
+	const bool bMore = s_ShaderManager.VitaPrepareLoaded( nDeadline, nCreated, nFailed );
+	*pnCreated += nCreated;
+	*pnFailed += nFailed;
+	return bMore ? 1 : 0;
+}
+
+DLL_EXPORT void VitaShaderPurgeUnused( void )
+{
+	s_ShaderManager.VitaPurgeUnused();
+}
+
+// the start of a run: everything is prepared again (the cache makes what's
+// already there quick)
+void CShaderManager::VitaPrepareReset()
+{
+	m_VitaPrepared.RemoveAll();
+	for ( VertexShader_t v = m_VertexShaderDict.Head(); v != m_VertexShaderDict.InvalidIndex(); v = m_VertexShaderDict.Next( v ) )
+		m_VertexShaderDict[v].m_nVitaPrepareNext = 0;
+	for ( PixelShader_t p = m_PixelShaderDict.Head(); p != m_PixelShaderDict.InvalidIndex(); p = m_PixelShaderDict.Next( p ) )
+		m_PixelShaderDict[p].m_nVitaPrepareNext = 0;
+}
+
+DLL_EXPORT void VitaShaderPrepareReset( void )
+{
+	s_ShaderManager.VitaPrepareReset();
+}
+#endif
+
 void* CShaderManager::GetCurrentVertexShader()
 {
 	return (void*)m_HardwareVertexShader;
@@ -3385,7 +3560,14 @@ void CShaderManager::SetVertexShader( VertexShader_t shader )
 		ShaderStaticCombos_t::ShaderCreationData_t *pCreationData = &vshLookup.m_ShaderStaticCombos.m_pCreationData[vshIndex];
 #endif
 
+#ifdef PLATFORM_VITA
+		const uint64_t nVitaStart = so_perf_now();
+#endif
 		dxshader = CreateD3DVertexShader( ( DWORD * )pCreationData->ByteCode.Base(), pCreationData->ByteCode.Count(), m_ShaderSymbolTable.String( vshLookup.m_Name ) );
+#ifdef PLATFORM_VITA
+		so_shader_record( 1, m_ShaderSymbolTable.String( vshLookup.m_Name ), vshLookup.m_nStaticIndex, vshIndex,
+			(unsigned)( so_perf_now() - nVitaStart ), dxshader == INVALID_HARDWARE_SHADER );
+#endif
 
 #ifdef DYNAMIC_SHADER_COMPILE 
 		// copy the compiled shader handle back to wherever it's supposed to be stored
@@ -3488,7 +3670,14 @@ void CShaderManager::SetPixelShader( PixelShader_t shader )
 #endif
 
 		const char *pShaderName = m_ShaderSymbolTable.String( pshLookup.m_Name );
+#ifdef PLATFORM_VITA
+		const uint64_t nVitaStart = so_perf_now();
+#endif
 		dxshader = CreateD3DPixelShader( ( DWORD * )pCreationData->ByteCode.Base(), pCreationData->iCentroidMask, pCreationData->ByteCode.Count(), pShaderName );
+#ifdef PLATFORM_VITA
+		so_shader_record( 0, pShaderName, pshLookup.m_nStaticIndex, pshIndex,
+			(unsigned)( so_perf_now() - nVitaStart ), dxshader == INVALID_HARDWARE_SHADER );
+#endif
 
 #ifdef DYNAMIC_SHADER_COMPILE 
 		// copy the compiled shader handle back to wherever it's supposed to be stored

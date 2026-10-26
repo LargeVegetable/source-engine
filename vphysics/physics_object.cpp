@@ -1525,7 +1525,7 @@ CPhysicsObject *CreatePhysicsObject( CPhysicsEnvironment *pEnvironment, const CP
 	Assert( position.IsValid() );
 	Assert( angles.IsValid() );
 
-#if _WIN32
+#if _WIN32 || defined( PLATFORM_VITA )
 	if ( !position.IsValid() || !angles.IsValid() )
 	{
 		DebuggerBreakIfDebugging();
