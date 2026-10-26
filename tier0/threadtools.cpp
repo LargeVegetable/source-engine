@@ -43,6 +43,11 @@
 # define OS_TO_PTHREAD(x) (pthread_t)(x)
 #endif
 
+#ifdef PLATFORM_VITA
+	#include <psp2/kernel/threadmgr.h>
+	#include <psp2/kernel/error.h>
+#endif
+
 #endif
 
 #ifndef _PS3
@@ -823,6 +828,12 @@ CThreadSyncObject::~CThreadSyncObject()
 		  Assert( 0 );
 	  }
    }
+#elif defined( PLATFORM_VITA )
+   if ( m_bInitalized )
+   {
+		sceKernelDeleteEventFlag( m_VitaEventFlag );
+		m_bInitalized = false;
+   }
 #elif defined(POSIX) && !defined( PS3 )
    if ( m_bInitalized )
    {
@@ -871,6 +882,18 @@ bool CThreadSyncObject::Wait( uint32 dwTimeout )
 #endif
 #ifdef _WIN32
    return ( WaitForSingleObject( m_hSyncObject, dwTimeout ) == WAIT_OBJECT_0 );
+#elif defined( PLATFORM_VITA )
+	if ( !m_bInitalized )
+		return false;
+	// An auto-reset event is taken by clearing the bit as the wait ends, which
+	// the kernel does for one waiter at a time
+	const unsigned int waitMode = m_bManualReset ? SCE_EVENT_WAITAND : ( SCE_EVENT_WAITAND | SCE_EVENT_WAITCLEAR_PAT );
+	unsigned int outBits = 0;
+	if ( dwTimeout == 0 )
+		return sceKernelPollEventFlag( m_VitaEventFlag, 1, waitMode, &outBits ) == 0;
+	// The kernel's timeout is in microseconds; longer ones wait without one
+	SceUInt timeoutUs = dwTimeout < 0xFFFFFFFFu / 1000 ? dwTimeout * 1000 : 0;
+	return sceKernelWaitEventFlag( m_VitaEventFlag, 1, waitMode, &outBits, timeoutUs ? &timeoutUs : NULL ) == 0;
 #elif defined( POSIX ) && !defined( PS3 )
     pthread_mutex_lock( &m_Mutex );
     bool bRet = false;
@@ -1093,6 +1116,18 @@ CThreadEvent::CThreadEvent( bool bManualReset )
 	{
 		LLLinkNode(m_pWaitObjectsPool, &m_waitObjects[i]);
 	}
+#elif defined( PLATFORM_VITA )
+	// A kernel event flag rather than a pthread condition variable:
+	// pthread-embedded's are built on semaphores it polls, and they lost
+	// wakeups: a job thread missed CThreadPool::SuspendExecution's call and
+	// the engine waited for its reply forever. Timed waits are the kernel's
+	// too, with no deadline from gettimeofday
+	m_VitaEventFlag = sceKernelCreateEventFlag( "CThreadEvent", SCE_EVENT_WAITMULTIPLE, 0, NULL );
+	AssertMsg1( m_VitaEventFlag >= 0, "Failed to create event flag (error 0x%x)", m_VitaEventFlag );
+	m_bInitalized = m_VitaEventFlag >= 0;
+	m_cSet = 0;
+	m_bWakeForEvent = false;
+	m_bManualReset = bManualReset;
 #elif defined( POSIX )
     pthread_mutexattr_t Attr;
     pthread_mutexattr_init( &Attr );
@@ -1300,6 +1335,8 @@ bool CThreadEvent::Set()
 	return true;
 
 
+#elif defined( PLATFORM_VITA )
+	return sceKernelSetEventFlag( m_VitaEventFlag, 1 ) == 0;
 #elif defined(POSIX)
    pthread_mutex_lock( &m_Mutex );
 	m_cSet = 1;
@@ -1361,12 +1398,14 @@ bool CThreadEvent::Reset()
    m_bSet = 0;
 
    return true;
+#elif defined( PLATFORM_VITA )
+	return sceKernelClearEventFlag( m_VitaEventFlag, ~1u ) == 0;
 #elif defined(POSIX)
 	pthread_mutex_lock( &m_Mutex );
 	m_cSet = 0;
 	m_bWakeForEvent = false;
 	pthread_mutex_unlock( &m_Mutex );
-	return true; 
+	return true;
 #endif
 }
 
