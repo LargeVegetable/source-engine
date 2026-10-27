@@ -111,6 +111,9 @@ public:
 	virtual MaterialThreadMode_t			GetThreadMode( ); // current thread mode
 	virtual bool							IsRenderThreadSafe( );
 	virtual bool							AllowThreading( bool bAllow, int nServiceThread );
+#ifdef PLATFORM_VITA
+	int										GetServiceThread() const { return m_nServiceThread; }	// PREPARE SHADERS restores queued rendering with it
+#endif
 	virtual void							ExecuteQueued();
 
 	//---------------------------------------------------------
