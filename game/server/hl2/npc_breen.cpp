@@ -114,6 +114,9 @@ void CNPC_Breen::Spawn()
 //-----------------------------------------------------------------------------
 void CNPC_Breen::Precache()
 {
+	// default model before Spawn: see CNPC_Kleiner::Precache
+	if ( GetModelName() == NULL_STRING )
+		SetModelName( AllocPooledString( "models/breen.mdl" ) );
 	PrecacheModel( STRING( GetModelName() ) );
 	BaseClass::Precache();
 }	

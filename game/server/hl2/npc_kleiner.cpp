@@ -115,6 +115,11 @@ void CNPC_Kleiner::Spawn()
 //-----------------------------------------------------------------------------
 void CNPC_Kleiner::Precache()
 {
+	// a point_template precaches its copy at map load, before Spawn picks the
+	// default model: without this the model loads mid-game when the template
+	// spawns (d1_trainstation_01, 335 ms on the Vita)
+	if ( GetModelName() == NULL_STRING )
+		SetModelName( AllocPooledString( "models/kleiner.mdl" ) );
 	PrecacheModel( STRING( GetModelName() ) );
 	
 	BaseClass::Precache();
