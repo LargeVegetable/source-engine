@@ -2426,7 +2426,20 @@ void CThreadRWLock::LockForWrite()
 	m_mutex.Lock();
 	bool bWait = ( m_nWriters != 0 || m_nActiveReaders != 0 );
 	m_nWriters++;
+#ifdef PLATFORM_VITA
+	// A reset is a kernel call on the Vita (sceKernelClearEventFlag), and
+	// this ran on every write lock: 3 percent of the render thread in the
+	// train scene (CMaterial's locks), with the event almost never set. It
+	// is set only in UnlockWrite with readers pending; its state is kept
+	// here under m_mutex, and the reset made only when it is set
+	if ( m_bVitaCanReadSet )
+	{
+		m_CanRead.Reset();
+		m_bVitaCanReadSet = false;
+	}
+#else
 	m_CanRead.Reset();
+#endif
 	m_mutex.Unlock();
 
 	if ( bWait )
@@ -2444,6 +2457,9 @@ void CThreadRWLock::UnlockWrite()
 		if ( m_nPendingReaders )
 		{
 			m_CanRead.Set();
+#ifdef PLATFORM_VITA
+			m_bVitaCanReadSet = true;
+#endif
 		}
 	}
 	else
