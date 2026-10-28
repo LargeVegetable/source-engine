@@ -345,6 +345,10 @@ public:
 		m_pOwner( pOwner ),
 		m_iThread( iThread )
 	{
+#ifdef PLATFORM_VITA
+		m_VitaWakeFlag = -1;
+		m_nVitaWakeTimeoutUs = 1000;
+#endif
 	}
 
 	CThreadEvent &GetIdleEvent()
@@ -398,14 +402,41 @@ private:
 		// the thread at once; elsewhere it's seen within ~1-2 ms: worker 0 (the
 		// server's, engine/host.cpp) waits on its direct queue, the others on
 		// the shared queue
-		const bool bVitaDirect = ( m_iThread == 0 );
+		//
+		// That polling cost a core: the train-scene profile (vdb, 10 s at
+		// 1 kHz) had three idle workers at 32 to 52 percent of a core each in
+		// these waits, about three syscalls a millisecond per thread. Now the
+		// three events raise a private wake flag (CThreadEvent::
+		// VitaAddListener) and the thread blocks on it: a job or a call wakes
+		// it at once, an idle worker costs nothing. The 100 ms timeout is
+		// only a safety net
+		if ( m_VitaWakeFlag < 0 )
+		{
+			m_VitaWakeFlag = sceKernelCreateEventFlag( "JobThreadWake", 0, 0, NULL );
+			if ( m_VitaWakeFlag >= 0 )
+			{
+				bool bAll = m_DirectQueue.GetEventHandle().VitaAddListener( m_VitaWakeFlag, 1 );
+				bAll = GetCallHandle().VitaAddListener( m_VitaWakeFlag, 1 ) && bAll;
+				bAll = m_SharedQueue.GetEventHandle().VitaAddListener( m_VitaWakeFlag, 1 ) && bAll;
+				// an event without our listener would only be seen at the
+				// timeout: back to 1 ms rounds then
+				m_nVitaWakeTimeoutUs = bAll ? 100 * 1000 : 1000;
+			}
+		}
 		while( !bSet )
 		{
-			bSet = m_DirectQueue.GetEventHandle().Wait( bVitaDirect ? 1 : 0 );
+			bSet = m_DirectQueue.GetEventHandle().Check() || GetCallHandle().Check() || m_SharedQueue.GetEventHandle().Check();
 			if ( !bSet )
-				bSet = GetCallHandle().Wait( 0 );
-			if ( !bSet )
-				bSet = m_SharedQueue.GetEventHandle().Wait( bVitaDirect ? 0 : 1 );
+			{
+				if ( m_VitaWakeFlag >= 0 )
+				{
+					unsigned int outBits = 0;
+					SceUInt timeoutUs = m_nVitaWakeTimeoutUs;
+					sceKernelWaitEventFlag( m_VitaWakeFlag, 1, SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT, &outBits, &timeoutUs );
+				}
+				else
+					ThreadSleep( 1 );	// no flag (out of kernel objects): the old 1 ms rounds
+			}
 		}
 #else
 		int nWaitTime = 100;
@@ -523,6 +554,16 @@ private:
 		}
 		m_pOwner->m_nIdleThreads--;
 		m_IdleEvent.Reset();
+#ifdef PLATFORM_VITA
+		if ( m_VitaWakeFlag >= 0 )
+		{
+			m_DirectQueue.GetEventHandle().VitaRemoveListener( m_VitaWakeFlag );
+			GetCallHandle().VitaRemoveListener( m_VitaWakeFlag );
+			m_SharedQueue.GetEventHandle().VitaRemoveListener( m_VitaWakeFlag );
+			sceKernelDeleteEventFlag( m_VitaWakeFlag );
+			m_VitaWakeFlag = -1;
+		}
+#endif
 		return 0;
 	}
 
@@ -531,6 +572,10 @@ private:
 	CThreadPool *		m_pOwner;
 	CThreadManualEvent	m_IdleEvent;
 	int					m_iThread;
+#ifdef PLATFORM_VITA
+	int					m_VitaWakeFlag;	// raised by the three events this thread waits for
+	unsigned			m_nVitaWakeTimeoutUs;
+#endif
 };
 
 //-----------------------------------------------------------------------------

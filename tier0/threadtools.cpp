@@ -831,6 +831,7 @@ CThreadSyncObject::~CThreadSyncObject()
 #elif defined( PLATFORM_VITA )
    if ( m_bInitalized )
    {
+		VitaWaitForSets();
 		sceKernelDeleteEventFlag( m_VitaEventFlag );
 		m_bInitalized = false;
    }
@@ -962,7 +963,89 @@ uint32 CThreadSyncObject::WaitForMultiple( int nObjects, CThreadSyncObject **ppO
 	return WaitForMultiple( nObjects, pHandles, bWaitAll, dwTimeout );
 
 #else
-	
+
+#ifdef PLATFORM_VITA
+	// Block instead of spinning: the generic loop below polls every object
+	// and calls ThreadSleep( 0 ), a CPU hint on the Vita, so a main thread
+	// waiting for its jobs (CThreadPool::YieldWait, infinite timeout) burned
+	// its core. Here the objects raise a temporary wake flag
+	// (VitaAddListener) and the thread sleeps on it between passes. Only
+	// CThreadEvents exist on POSIX, all with an event flag
+	if ( dwTimeout != 0 )
+	{
+		// one wake flag per thread, created on its first wait and kept: no
+		// two kernel calls per wait, and no late Set() landing on a deleted
+		// flag's recycled id. A stale bit only costs one extra round
+		static CThreadLocalInt<int> s_VitaWakeFlag;	// flag id + 1
+		int wakeFlag = s_VitaWakeFlag.Get() - 1;
+		if ( wakeFlag < 0 )
+		{
+			wakeFlag = sceKernelCreateEventFlag( "WaitForMultiple", 0, 0, NULL );
+			if ( wakeFlag >= 0 )
+				s_VitaWakeFlag.Set( wakeFlag + 1 );
+		}
+		if ( wakeFlag >= 0 )
+		{
+			bool bListening = true;
+			for ( int i = 0; i < nObjects; i++ )
+				bListening = ppObjects[i]->VitaAddListener( wakeFlag, 1 ) && bListening;
+			uint32 result = TW_TIMEOUT;
+			if ( bListening )
+			{
+				uint32 dwStart = Plat_MSTime();
+				char *pTriggered = (char *)stackalloc( nObjects );
+				memset( pTriggered, 0, nObjects );
+				int nTriggered = 0;
+				for ( ;; )
+				{
+					bool bDone = false;
+					for ( int i = 0; i < nObjects && !bDone; i++ )
+					{
+						if ( pTriggered[i] || !ppObjects[i]->Wait( 0 ) )
+							continue;
+						if ( !bWaitAll )
+						{
+							result = i;
+							bDone = true;
+						}
+						else
+						{
+							pTriggered[i] = 1;
+							if ( ++nTriggered == nObjects )
+							{
+								result = 0;
+								bDone = true;
+							}
+						}
+					}
+					if ( bDone )
+						break;
+					// at most 100 ms per kernel wait, then the objects are polled
+					// again: a missed wake costs a hitch, never a hang
+					uint32 dwWaitMs = 100;
+					if ( dwTimeout != TT_INFINITE )
+					{
+						uint32 dwElapsed = Plat_MSTime() - dwStart;
+						if ( dwElapsed >= dwTimeout )
+							break;
+						uint32 dwLeft = dwTimeout - dwElapsed;
+						if ( dwLeft < dwWaitMs )
+							dwWaitMs = dwLeft;
+					}
+					SceUInt timeoutUs = dwWaitMs * 1000;
+					unsigned int outBits = 0;
+					sceKernelWaitEventFlag( wakeFlag, 1, SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT, &outBits, &timeoutUs );
+				}
+			}
+			for ( int i = 0; i < nObjects; i++ )
+				ppObjects[i]->VitaRemoveListener( wakeFlag );
+			if ( bListening )
+				return result;
+		}
+		// no flag or no free slot: the polling loop below
+	}
+#endif
+
 	// TODO: Need a more efficient implementation of this.
 	uint32 dwStartTime = 0;
 	
@@ -1125,6 +1208,12 @@ CThreadEvent::CThreadEvent( bool bManualReset )
 	m_VitaEventFlag = sceKernelCreateEventFlag( "CThreadEvent", SCE_EVENT_WAITMULTIPLE, 0, NULL );
 	AssertMsg1( m_VitaEventFlag >= 0, "Failed to create event flag (error 0x%x)", m_VitaEventFlag );
 	m_bInitalized = m_VitaEventFlag >= 0;
+	for ( int i = 0; i < VITA_MAX_LISTENERS; i++ )
+	{
+		m_VitaListenerFlag[i] = 0;
+		m_VitaListenerBits[i] = 0;
+	}
+	m_nVitaSetsInFlight = 0;
 	m_cSet = 0;
 	m_bWakeForEvent = false;
 	m_bManualReset = bManualReset;
@@ -1336,7 +1425,21 @@ bool CThreadEvent::Set()
 
 
 #elif defined( PLATFORM_VITA )
-	return sceKernelSetEventFlag( m_VitaEventFlag, 1 ) == 0;
+	// Setting the event's own bit may wake a thread that destroys the event
+	// right away (CThread::Start's stack-local createComplete): the
+	// in-flight count keeps the object alive until the listener loop is done
+	__sync_fetch_and_add( &m_nVitaSetsInFlight, 1 );
+	bool bRet = sceKernelSetEventFlag( m_VitaEventFlag, 1 ) == 0;
+	// after the event's own bit: a woken listener checks the event and must
+	// find it set
+	for ( int i = 0; i < VITA_MAX_LISTENERS; i++ )
+	{
+		int flag = m_VitaListenerFlag[i];
+		if ( flag > 0 )
+			sceKernelSetEventFlag( flag, m_VitaListenerBits[i] );
+	}
+	__sync_fetch_and_sub( &m_nVitaSetsInFlight, 1 );
+	return bRet;
 #elif defined(POSIX)
    pthread_mutex_lock( &m_Mutex );
 	m_cSet = 1;
@@ -1382,6 +1485,44 @@ bool CThreadEvent::Set()
 #endif	// NEW_WAIT_FOR_MULTIPLE_OBJECTS
 //////////////////////////////////////////////////////////////
 }
+
+//---------------------------------------------------------
+
+#ifdef PLATFORM_VITA
+bool CThreadSyncObject::VitaAddListener( int eventFlag, unsigned bits )
+{
+	for ( int i = 0; i < VITA_MAX_LISTENERS; i++ )
+	{
+		// claim a free slot (-1 while its bits are written), then publish
+		if ( __sync_bool_compare_and_swap( &m_VitaListenerFlag[i], 0, -1 ) )
+		{
+			m_VitaListenerBits[i] = bits;
+			__sync_synchronize();
+			m_VitaListenerFlag[i] = eventFlag;
+			return true;
+		}
+	}
+	return false;
+}
+
+void CThreadSyncObject::VitaRemoveListener( int eventFlag )
+{
+	for ( int i = 0; i < VITA_MAX_LISTENERS; i++ )
+		if ( m_VitaListenerFlag[i] == eventFlag )
+			__sync_bool_compare_and_swap( &m_VitaListenerFlag[i], eventFlag, 0 );
+	// a Set() that read the slot before it was cleared may still set the
+	// flag: the caller may reuse or delete it only after that
+	VitaWaitForSets();
+}
+
+void CThreadSyncObject::VitaWaitForSets()
+{
+	// the window is two kernel calls long; sleep rather than spin, since a
+	// Set() on the same core at an equal priority would never get to run
+	while ( m_nVitaSetsInFlight )
+		sceKernelDelayThread( 50 );
+}
+#endif
 
 //---------------------------------------------------------
 
