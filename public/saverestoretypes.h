@@ -383,7 +383,23 @@ inline bool CSaveRestoreSegment::Write( const void *pData, int nBytes )
 		return false;
 	}
 
-	memcpy( pCurrentData, pData, nBytes );
+	// most writes are a field header or one int or float: copy those inline
+	// rather than calling memcpy (through the dynamic linker's stub)
+	switch ( nBytes )
+	{
+	case 4:
+		memcpy( pCurrentData, pData, 4 );
+		break;
+	case 2:
+		memcpy( pCurrentData, pData, 2 );
+		break;
+	case 1:
+		*pCurrentData = *(const char *)pData;
+		break;
+	default:
+		memcpy( pCurrentData, pData, nBytes );
+		break;
+	}
 	MoveCurPos( nBytes );
 
 	return true;
@@ -460,6 +476,20 @@ inline bool CSaveRestoreSegment::DefineSymbol( const char *pszToken, int token )
 
 inline unsigned short CSaveRestoreSegment::FindCreateSymbol( const char *pszToken )
 {
+	// Field names are static strings, written once per field per entity:
+	// remember where each pointer was last found. A hit is checked against
+	// the table (the slot still holds this very pointer, and a string has
+	// one slot), so it returns what the probe below would; a miss probes
+	static const char *s_pCachedToken[256];
+	static unsigned short s_nCachedIndex[256];
+	const unsigned nCacheSlot = ( (uintp)pszToken >> 2 ) & 255;
+	if ( s_pCachedToken[nCacheSlot] == pszToken )
+	{
+		const unsigned short nIndex = s_nCachedIndex[nCacheSlot];
+		if ( nIndex < (unsigned)tokenCount && pTokens[nIndex] == pszToken )
+			return nIndex;
+	}
+
 	unsigned short	hash = (unsigned short)(HashString( pszToken ) % (unsigned)tokenCount );
 	
 #if _DEBUG
@@ -489,6 +519,8 @@ inline unsigned short CSaveRestoreSegment::FindCreateSymbol( const char *pszToke
 		if ( !pTokens[index] || strcmp( pszToken, pTokens[index] ) == 0 )
 		{
 			pTokens[index] = (char *)pszToken;
+			s_pCachedToken[nCacheSlot] = pszToken;
+			s_nCachedIndex[nCacheSlot] = index;
 			return index;
 		}
 	}
