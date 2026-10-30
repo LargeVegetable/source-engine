@@ -205,19 +205,27 @@ CSave::CSave( CSaveRestoreData *pdata )
 
 inline int CSave::DataEmpty( const char *pdata, int size )
 {
-	static int void_data = 0;
-	if ( size != 4 )
+	// Every saved field of every entity goes through here (ShouldSaveField):
+	// test a word at a time once aligned, not byte by byte. Same result
+	while ( size > 0 && ( (uintp)pdata & 3 ) )
 	{
-		const char *pLimit = pdata + size;
-		while ( pdata < pLimit )
-		{
-			if ( *pdata++ )
-				return 0;
-		}
-		return 1;
+		if ( *pdata++ )
+			return 0;
+		size--;
 	}
-
-	return memcmp(pdata, &void_data, sizeof(int)) == 0;
+	for ( ; size >= 4; size -= 4, pdata += 4 )
+	{
+		uint32 word;
+		memcpy( &word, pdata, sizeof( word ) );
+		if ( word )
+			return 0;
+	}
+	while ( size-- > 0 )
+	{
+		if ( *pdata++ )
+			return 0;
+	}
+	return 1;
 }
 
 //-----------------------------------------------------------------------------
@@ -940,8 +948,10 @@ void CSave::WriteHeader( const char *pname, int size )
 		Assert(0);
 	}
 
-	BufferData( (const char *)&shortSize, sizeof(short) );
-	BufferData( (const char *)&hashvalue, sizeof(short) );
+	// one 4-byte write, not two 2-byte ones: the same bytes, half the calls
+	// (every field written has a header)
+	short header[2] = { shortSize, hashvalue };
+	BufferData( (const char *)header, sizeof( header ) );
 }
 
 //-------------------------------------
