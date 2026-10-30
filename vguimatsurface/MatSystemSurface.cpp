@@ -2060,6 +2060,23 @@ void *CMatSystemSurface::FontDataHelper( const char *pchFontName, int &size, con
 	{
 		// If we were given a fontFileName, then load that bugger and shove it in the cache.
 
+		// The cache is keyed by the requested font name, and several names
+		// (Tahoma, Verdana, ...) map to the same fallback file: each new
+		// name read the file again (dejavusans.ttf 740 KB, 10 times, ~0.6 s
+		// of the Vita's startup). A second key by file name shares the data
+		CUtlString strFileKey( "file:" );
+		strFileKey += fontFileName;
+		int iFile = m_FontData.Find( strFileKey.Get() );
+		if ( iFile != m_FontData.InvalidIndex() && pchFontName )
+		{
+			CUtlString strAlias( pchFontName );
+			RemoveSpaces( strAlias );
+			if ( m_FontData.Find( strAlias.Get() ) == m_FontData.InvalidIndex() )
+				m_FontData.Insert( strAlias.Get(), m_FontData[ iFile ] );	// shares the data (never freed: process lifetime)
+			size = m_FontData[ iFile ].size;
+			return m_FontData[ iFile ].data;
+		}
+
 		// Just load the font data, decrypt in memory and register for this process
 		CUtlBuffer buf;
 		if ( !g_pFullFileSystem->ReadFile( fontFileName, NULL, buf ) )
@@ -2097,6 +2114,7 @@ void *CMatSystemSurface::FontDataHelper( const char *pchFontName, int &size, con
 		entry.data = malloc( entry.size );
 		memcpy( entry.data, buf.Base(), entry.size );
 		m_FontData.Insert( strFontName.Get(), entry );
+		m_FontData.Insert( strFileKey.Get(), entry );
 
 		FT_Done_Face( face );
 
