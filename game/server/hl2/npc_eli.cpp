@@ -126,6 +126,9 @@ void CNPC_Eli::Spawn()
 //-----------------------------------------------------------------------------
 void CNPC_Eli::Precache()
 {
+	// default model before Spawn: see CNPC_Kleiner::Precache
+	if ( GetModelName() == NULL_STRING )
+		SetModelName( AllocPooledString( "models/eli.mdl" ) );
 	PrecacheModel( STRING( GetModelName() ) );
 	BaseClass::Precache();
 }	

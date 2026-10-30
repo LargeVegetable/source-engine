@@ -1137,6 +1137,9 @@ void CNPC_Vortigaunt::Precache()
 {
 	UTIL_PrecacheOther( "vort_charge_token" );
 
+	// default model before Spawn: see CNPC_Kleiner::Precache
+	if ( GetModelName() == NULL_STRING )
+		SetModelName( AllocPooledString( "models/vortigaunt.mdl" ) );
 	PrecacheModel( STRING( GetModelName() ) );
 
 	m_nLightningSprite = PrecacheModel("sprites/lgtning.vmt");
