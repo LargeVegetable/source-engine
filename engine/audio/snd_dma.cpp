@@ -246,6 +246,10 @@ int				g_SoundClockPaintTime[NUM_CLOCK_SYNCS] = {0};
 
 // default 10ms
 ConVar snd_delay_sound_shift("snd_delay_sound_shift","0.01");
+#ifdef PLATFORM_VITA
+// sounds larger than this stream in pieces instead of loading whole (S_LoadSound); 0 = never
+ConVar vita_snd_stream_minsize( "vita_snd_stream_minsize", "262144", FCVAR_NONE, "Vita: .wav sounds above this many bytes are streamed (read in pieces ahead of playback) instead of loaded whole; 0 = off" );
+#endif
 // this forces the clock to resync on the next delayed/sync sound
 void S_SyncClockAdjust( clocksync_index_t syncIndex )
 {
@@ -994,6 +998,20 @@ CAudioSource *S_LoadSound( CSfxTable *pSfx, channel_t *ch )
 			}
 		}
 
+#ifdef PLATFORM_VITA
+		// Big sounds stream (as the 360 does for all but critical sounds)
+		// instead of loading whole: a 1.3 MB ambient loop or a long voice
+		// line was one 100-150 ms read on the io thread, and the mixer,
+		// starting from the audio cache's first 0.125 s, then blocked the
+		// engine thread for the rest (the stutters a few words into a
+		// speech). Streamed, it's read in pieces ahead of the mix position
+		if ( !bStream && !bUserVox && vita_snd_stream_minsize.GetInt() > 0 )
+		{
+			CAudioSourceCachedInfo *pInfo = audiosourcecache->GetInfo( CAudioSource::AUDIO_SOURCE_WAV, pSfx->IsPrecachedSound(), pSfx );
+			if ( pInfo && pInfo->Type() == CAudioSource::AUDIO_SOURCE_WAV && pInfo->DataSize() > vita_snd_stream_minsize.GetInt() )
+				bStream = true;
+		}
+#endif
 		if ( bStream )
 		{
 			// setup as a streaming resource
