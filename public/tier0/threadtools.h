@@ -1377,6 +1377,17 @@ public:
 	// This builds a list of pointers and calls straight through to the other WaitForMultiple.
 	static uint32 WaitForMultiple( int nObjects, CThreadSyncObject *ppObjects, bool bWaitAll, uint32 dwTimeout = TT_INFINITE );
 
+#ifdef PLATFORM_VITA
+	// CThreadEvent::Set() also sets these bits on the given kernel event
+	// flag, until removed: a thread that must wake on any of several events
+	// registers one flag of its own on each and blocks on it, instead of
+	// polling them all (the Vita has no wait on several event flags). The
+	// caller checks the events after registering and before each wait; a
+	// stale bit only costs one extra round. False when the slots are full
+	bool VitaAddListener( int eventFlag, unsigned bits );
+	void VitaRemoveListener( int eventFlag );
+#endif
+
 protected:
 	CThreadSyncObject();
 	void AssertUseable();
@@ -1399,6 +1410,16 @@ protected:
 	// The event on the Vita: a kernel event flag (bit 1 set while signaled)
 	// instead of m_Mutex and m_Condition. See CThreadEvent::CThreadEvent
 	int m_VitaEventFlag;
+	// Other event flags Set() raises as well (flag id, bits; 0 = free slot):
+	// one kernel wait then covers several events, see CThreadEvent::VitaAddListener
+	enum { VITA_MAX_LISTENERS = 8 };
+	volatile int m_VitaListenerFlag[VITA_MAX_LISTENERS];
+	volatile unsigned m_VitaListenerBits[VITA_MAX_LISTENERS];
+	// Set() calls still using this object after setting its own bit (which
+	// may already have woken a thread that destroys the event or deletes a
+	// listener's flag): the destructor and VitaRemoveListener wait them out
+	volatile int m_nVitaSetsInFlight;
+	void VitaWaitForSets();
 #endif
 #else
 #error "Implement me"
@@ -1556,6 +1577,7 @@ public:
 	void RegisterWaitingThread(sys_semaphore_t *pSemaphore, int index, int *flag);
 	void UnregisterWaitingThread(sys_semaphore_t *pSemaphore);
 #endif
+
 
 protected:
 #ifdef _PS3
