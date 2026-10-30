@@ -5628,6 +5628,7 @@ static int ReadListFromFile(CUtlVector<char*>* outReplacementMaterials, const ch
 #include <malloc.h>
 
 extern "C" void so_trace( const char *fmt, ... );	// launcher: boot log
+extern "C" void so_heap_check( const char *where );	// launcher: newlib heap walk, logs the first bad chunk (-vitadebug)
 extern "C" size_t vglMemExternalInUse( void );		// launcher (vitaGL): its objects in the heap
 
 #define VITA_PREPARE_FILE	"cfg/vita_prepare_shaders.txt"
@@ -5722,6 +5723,11 @@ static void VitaPrepareFreeBatch()
 	g_MaterialSystem.UncacheUnusedMaterials( true );
 	if ( s_VitaPrepare.pfnPurgeUnused )
 		s_VitaPrepare.pfnPurgeUnused();
+	// -vitadebug: a run followed by play in the same process crashed inside
+	// malloc (2026-10-27): the heap walk after every batch's frees puts the
+	// first corruption at a batch, with the bytes that overwrote the chunk
+	if ( CommandLine()->CheckParm( "-vitadebug" ) )
+		so_heap_check( "prepare batch" );
 }
 
 static int VitaPrepareCompareNames( const CUtlString *a, const CUtlString *b )
@@ -5919,6 +5925,8 @@ static void VitaPrepareStep( unsigned nBudgetUs )
 	}
 }
 
+static bool s_bVitaPrepareThreadingOff;	// queued rendering turned off for the run
+
 DLL_EXPORT int VitaPrepareShaders( int nCommand, unsigned nBudgetUs, VitaPrepareStatus_t *pStatus )
 {
 	VitaPrepareStatus_t &status = s_VitaPrepare.status;
@@ -5936,6 +5944,12 @@ DLL_EXPORT int VitaPrepareShaders( int nCommand, unsigned nBudgetUs, VitaPrepare
 	}
 	case VITA_PREPARE_START:
 	case VITA_PREPARE_RESTART:
+		// The run creates and deletes GL shaders on this thread; queued
+		// rendering has the MatQueue thread in GL at the same time, and
+		// vitaGL isn't thread-safe. Single-threaded for the run (as the
+		// engine's map-load shader preload does), restored when it ends
+		if ( !s_bVitaPrepareThreadingOff && g_MaterialSystem.AllowThreading( false, g_MaterialSystem.GetServiceThread() ) )
+			s_bVitaPrepareThreadingOff = true;
 		VitaPrepareBegin( nCommand == VITA_PREPARE_START );
 		break;
 	case VITA_PREPARE_STEP:
@@ -5962,6 +5976,11 @@ DLL_EXPORT int VitaPrepareShaders( int nCommand, unsigned nBudgetUs, VitaPrepare
 			s_VitaPrepare.dirs.Purge();
 		}
 		break;
+	}
+	if ( s_bVitaPrepareThreadingOff && status.nState != VITA_PREPARE_RUNNING && status.nState != VITA_PREPARE_FINDING )
+	{
+		s_bVitaPrepareThreadingOff = false;
+		g_MaterialSystem.AllowThreading( true, g_MaterialSystem.GetServiceThread() );
 	}
 	if ( pStatus )
 		*pStatus = status;
