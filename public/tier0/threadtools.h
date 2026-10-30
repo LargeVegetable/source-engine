@@ -1395,6 +1395,11 @@ protected:
 	int m_cSet;
 	bool m_bManualReset;
 	bool m_bWakeForEvent;
+#ifdef PLATFORM_VITA
+	// The event on the Vita: a kernel event flag (bit 1 set while signaled)
+	// instead of m_Mutex and m_Condition. See CThreadEvent::CThreadEvent
+	int m_VitaEventFlag;
+#endif
 #else
 #error "Implement me"
 #endif
