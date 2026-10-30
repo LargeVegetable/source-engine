@@ -1696,6 +1696,9 @@ private:
 #endif
 	CThreadEvent m_CanWrite;
 	CThreadEvent m_CanRead;
+#ifdef PLATFORM_VITA
+	bool m_bVitaCanReadSet;	// m_CanRead's state, under m_mutex: see LockForWrite
+#endif
 
 	int m_nWriters;
 	int m_nActiveReaders;
@@ -2405,6 +2408,9 @@ inline CThreadRWLock::CThreadRWLock()
 	m_nActiveReaders( 0 ),
 	m_nPendingReaders( 0 )
 {
+#ifdef PLATFORM_VITA
+	m_bVitaCanReadSet = false;
+#endif
 }
 
 inline void CThreadRWLock::LockForRead()
