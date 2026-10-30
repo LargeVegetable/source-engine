@@ -470,6 +470,22 @@ private:
 			sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 << ( m_iThread % 2 ) );
 			so_thread_register( m_iThread == 0 ? "worker 0 (server)" : m_iThread == 1 ? "worker 1" : "worker" );
 		}
+		else if ( !strncmp( GetName(), "IOJob", 5 ) )
+		{
+			// The filesystem's async read threads (filesystem_async.cpp; the
+			// pool starts one per logical processor, three on the Vita).
+			// Unpinned, they stayed on their creator's core 0 with the engine
+			// thread (88-95% busy); equal priorities aren't time-sliced on
+			// the Vita, so a finished read was only noticed, and the next one
+			// issued, when the engine thread blocked. All three on core 1 (the
+			// server worker, 20-40% busy). At the engine threads' priority:
+			// one step above, a 30 KB read on the server thread once waited
+			// 1 s behind a burst of sound reads (the card serves one request
+			// at a time, and the kernel took the higher priority first)
+			static const char *s_IoThreadNames[] = { "io 0", "io 1", "io 2", "io 3", "io 4", "io 5", "io 6", "io 7" };
+			sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 );
+			so_thread_register( s_IoThreadNames[ m_iThread & 7 ] );
+		}
 		so_thread_name( GetName() );	// every pool: FsAsyncIO0, SaveJob0...
 #endif
 
