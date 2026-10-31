@@ -88,6 +88,9 @@ ConVar r_lod( "r_lod", "-1", 0, "", r_lod_f );
 static ConVar r_entity( "r_entity", "-1", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY );
 static ConVar r_lightaverage( "r_lightaverage", "1", 0, "Activates/deactivate light averaging" );
 static ConVar r_lightinterp( "r_lightinterp", "5", FCVAR_CHEAT, "Controls the speed of light interpolation, 0 turns off interpolation" );
+#ifdef PLATFORM_VITA
+static ConVar r_vita_lightaverage_dynamic_crisp( "r_vita_lightaverage_dynamic_crisp", "1", FCVAR_NONE, "Vita: with r_lightaverage, only static and lightstyle model lighting is time averaged; dynamic lights (muzzle flashes, flashlight, explosions) are added afterwards and stay crisp (1, default). 0 = stock, everything averaged" );
+#endif
 static ConVar r_eyeglintlodpixels( "r_eyeglintlodpixels", "20.0", FCVAR_CHEAT, "The number of pixels wide an eyeball has to be before rendering an eyeglint.  Is a floating point value." );
 ConVar r_rootlod( "r_rootlod", "0", FCVAR_MATERIAL_SYSTEM_THREAD | FCVAR_ARCHIVE, "Root LOD", true, 0, true, MAX_NUM_LODS-1, SetRootLOD_f );
 static ConVar r_decalstaticprops( "r_decalstaticprops", "1", 0, "Decal static props test" );
@@ -1406,6 +1409,41 @@ static ConVar r_ambientfactor( "r_ambientfactor", "5", FCVAR_ARCHIVE, "Boost amb
 static ConVar r_lightcachemodel ( "r_lightcachemodel", "-1", FCVAR_CHEAT, "" );
 static ConVar r_drawlightcache ("r_drawlightcache", "0", FCVAR_CHEAT, "0: off\n1: draw light cache entries\n2: draw rays\n");
 
+#ifdef PLATFORM_VITA
+//-----------------------------------------------------------------------------
+// Adds the dynamic lights (a LIGHTCACHEFLAGS_DYNAMIC-only lighting state) on
+// top of a time averaged static + lightstyle state. A dynamic local light
+// takes a free slot, else it goes into the ambient cube, as the averaging
+// does with its own lights beyond r_worldlights; the averaged lights keep
+// their slots so they don't pop when a muzzle flash fires. With
+// r_worldlights 0 both states have no local lights: only the cubes add
+//-----------------------------------------------------------------------------
+static void VitaAddDynamicLightingState( LightingState_t &dst, const LightingState_t &dynamicState, const Vector &vecLightingOrigin )
+{
+	for ( int i = 0; i < 6; ++i )
+	{
+		dst.r_boxcolor[i] += dynamicState.r_boxcolor[i];
+	}
+
+	if ( dynamicState.numlights <= 0 )
+		return;
+
+	int nWorldLights = min( g_pMaterialSystemHardwareConfig->MaxNumLights(), r_worldlights.GetInt() );
+	nWorldLights = clamp( nWorldLights, 0, MAXLOCALLIGHTS );
+	for ( int i = 0; i < dynamicState.numlights; ++i )
+	{
+		if ( dst.numlights < nWorldLights )
+		{
+			dst.locallight[dst.numlights++] = dynamicState.locallight[i];
+		}
+		else
+		{
+			AddWorldLightToAmbientCube( dynamicState.locallight[i], vecLightingOrigin, dst.r_boxcolor );
+		}
+	}
+}
+#endif
+
 
 //-----------------------------------------------------------------------------
 // Sets up lighting state for rendering
@@ -1428,6 +1466,16 @@ void CModelRender::StudioSetupLighting( const DrawModelState_t &state, const Vec
 
 	// Cache off lighting data for rendering decals - only on dx8/dx9.
 	LightingState_t lightingDecalState;
+
+#ifdef PLATFORM_VITA
+	// Dynamic lights fetched apart from the time averaged lighting, and the
+	// two added together (r_vita_lightaverage_dynamic_crisp, see below)
+	bool bVitaDynamicApart = false;
+	LightingState_t vitaDynamicState;
+	vitaDynamicState.numlights = 0;	// the lighting offset loops below walk it
+	LightingState_t vitaCombinedState;
+	Vector pVitaSaveDynamicLightPos[MAXLOCALLIGHTS];
+#endif
 
 	drawInfo.m_bStaticLighting = bStaticLighting && g_pMaterialSystemHardwareConfig->SupportsStaticPlusDynamicLighting();
 	drawInfo.m_nLocalLightCount = 0;
@@ -1566,6 +1614,30 @@ void CModelRender::StudioSetupLighting( const DrawModelState_t &state, const Vec
 				}
 			}
 	
+#ifdef PLATFORM_VITA
+			// r_lightaverage eases model lighting across light cache cells,
+			// but averaging the dynamic lights too would show 0.05 s muzzle-
+			// flash elights at ~15-40% and ramp the flashlight's dlight in over
+			// ~0.3 s. When this model gets averaged (TimeAverageLightingState's
+			// conditions), only the static + lightstyle part is fetched for
+			// it; the dlights and elights are fetched apart, only while any
+			// are active, and added after the averaging below
+			if ( r_vita_lightaverage_dynamic_crisp.GetBool() && r_lightaverage.GetInt() != 0 &&
+				r_lightinterp.GetFloat() != 0.0f && pInfo.instance != MODEL_INSTANCE_INVALID )
+			{
+				pEnvCubemapTexture = LightcacheGetDynamic( vLightingOrigin, lightingState, stats,
+					LIGHTCACHEFLAGS_STATIC|LIGHTCACHEFLAGS_LIGHTSTYLE|LIGHTCACHEFLAGS_ALLOWFAST, bDebugModel );
+				if ( g_bActiveDlights || g_bActiveElights )
+				{
+					LightcacheGetDynamic_Stats dynamicStats;
+					LightcacheGetDynamic( vLightingOrigin, vitaDynamicState, dynamicStats,
+						LIGHTCACHEFLAGS_DYNAMIC|LIGHTCACHEFLAGS_ALLOWFAST );
+					Assert( vitaDynamicState.numlights >= 0 && vitaDynamicState.numlights <= MAXLOCALLIGHTS );
+					bVitaDynamicApart = true;
+				}
+			}
+			else
+#endif
 			pEnvCubemapTexture = LightcacheGetDynamic( vLightingOrigin, lightingState, stats, 
 				LIGHTCACHEFLAGS_STATIC|LIGHTCACHEFLAGS_DYNAMIC|LIGHTCACHEFLAGS_LIGHTSTYLE|LIGHTCACHEFLAGS_ALLOWFAST, bDebugModel );
 
@@ -1579,6 +1651,15 @@ void CModelRender::StudioSetupLighting( const DrawModelState_t &state, const Vec
 				pSaveLightPos[i] = lightingState.locallight[i]->origin; 
 				VectorITransform( pSaveLightPos[i], *pInfo.pLightingOffset, lightingState.locallight[i]->origin );
 			}
+#ifdef PLATFORM_VITA
+			// The dynamic lights fetched apart move with the others (restored
+			// at the end of this function)
+			for ( int i = 0; i < vitaDynamicState.numlights; ++i )
+			{
+				pVitaSaveDynamicLightPos[i] = vitaDynamicState.locallight[i]->origin;
+				VectorITransform( pVitaSaveDynamicLightPos[i], *pInfo.pLightingOffset, vitaDynamicState.locallight[i]->origin );
+			}
+#endif
 		}
 
 		// Cache lighting for decals.
@@ -1614,6 +1695,18 @@ void CModelRender::StudioSetupLighting( const DrawModelState_t &state, const Vec
 	if ( !bStaticLighting && !pLightcache )
 	{
 		pState = TimeAverageLightingState( pInfo.instance, &lightingState, pInfo.entity_index, pDebugLightingOrigin );
+#ifdef PLATFORM_VITA
+		// Dynamic lights on top of the averaged state, at full strength. Into
+		// a copy: pState can be lightingState itself (first frame), whose
+		// light list the lighting offset restore below walks, or
+		// TimeAverageLightingState's static state
+		if ( bVitaDynamicApart )
+		{
+			vitaCombinedState = *pState;
+			VitaAddDynamicLightingState( vitaCombinedState, vitaDynamicState, vLightingOrigin );
+			pState = &vitaCombinedState;
+		}
+#endif
 	}
 	else
 	{
@@ -1740,6 +1833,12 @@ void CModelRender::StudioSetupLighting( const DrawModelState_t &state, const Vec
 		{
 			lightingState.locallight[i]->origin = pSaveLightPos[i];
 		}
+#ifdef PLATFORM_VITA
+		for ( int i = 0; i < vitaDynamicState.numlights; ++i )
+		{
+			vitaDynamicState.locallight[i]->origin = pVitaSaveDynamicLightPos[i];
+		}
+#endif
 	}
 #endif
 }

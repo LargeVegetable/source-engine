@@ -622,6 +622,7 @@ public:
 	CTextureManager( void );
 #ifdef PLATFORM_VITA
 	void VitaTextureReport();	// vita_texture_report
+	void VitaApplyTextureDetail();	// VitaTextureDetailApply, at map and save loads
 #endif
 
 	// Initialization + shutdown
@@ -803,28 +804,27 @@ static CTextureManager s_TextureManager;
 ITextureManager *g_pTextureManager = &s_TextureManager;
 
 #ifdef PLATFORM_VITA
-// What the loaded textures take now and would take at sharper settings
-// (for planning a sharper-texture option): each texture's loaded size is
-// worked out again from its file size the way ComputeMipSkipCount does it
-// (mat_picmip halvings that stop at the floors), at mat_picmip 3 with a
-// 128 floor, at mat_picmip 2, and with the 128 floor for world textures
-// only (models/ keep 64). Render targets and procedural textures are left
-// out. Run by the engine once a map has loaded. Temporary
-extern ConVar mat_picmip_min_size, mat_picmip_alphatest_min_size, mat_picmip_viewmodel_min_size;
-#define VITA_TEXTUREFLAGS_ALPHATEST TEXTUREFLAGS_UNUSED_00400000	// ctexture.cpp TEXTUREFLAGS_VITA_ALPHATEST
+// What the loaded textures take now and would take at other settings (for
+// choosing texture settings): each texture's loaded size is worked out again
+// from its file size the way ComputeMipSkipCount does it (mat_picmip halvings
+// that stop at the floors, ctexture.cpp VitaPicmipMinSize; not the 4 MB cap).
+// Texture detail's world and character classes are counted on their own, as
+// loaded and as they would be at Low. Render targets and procedural textures
+// are left out. Run by the engine once a map has loaded (-vitadebug)
+extern ConVar vita_texture_detail;
+int VitaPicmipMinSize( const char *pName, unsigned int nFlags, int nDetail );	// ctexture.cpp
+bool VitaIsWorldTexture( const char *pName, unsigned int nFlags );
+bool VitaIsCharacterTexture( const char *pName, unsigned int nFlags );
+bool VitaReloadForTextureDetail( ITextureInternal *pTexture );
 
-static int VitaTextureBytes( ITexture *pTex, int nPicmip, int nFloor )
+// nDetail: the Texture detail level whose floors apply (-1: the current
+// settings); nFloor raises every floor to at least that
+static int VitaTextureBytes( ITexture *pTex, int nPicmip, int nDetail, int nFloor = 0 )
 {
 	int w = pTex->GetMappingWidth(), h = pTex->GetMappingHeight();
-	const unsigned nFlags = pTex->GetFlags();
-	if ( !( nFlags & TEXTUREFLAGS_NOLOD ) )
+	if ( !( pTex->GetFlags() & TEXTUREFLAGS_NOLOD ) )
 	{
-		int nMin = nFloor;
-		if ( nFlags & VITA_TEXTUREFLAGS_ALPHATEST )
-			nMin = MAX( nMin, mat_picmip_alphatest_min_size.GetInt() );
-		if ( !V_strnicmp( pTex->GetName(), "models/weapons/v_", 17 ) )
-			nMin = MAX( nMin, mat_picmip_viewmodel_min_size.GetInt() );
-		nMin = MAX( nMin, 4 );
+		const int nMin = MAX( nFloor, VitaPicmipMinSize( pTex->GetName(), pTex->GetFlags(), nDetail ) );
 		for ( int i = 0; i < nPicmip; i++ )
 		{
 			if ( w > nMin && h > nMin )
@@ -840,36 +840,89 @@ static int VitaTextureBytes( ITexture *pTex, int nPicmip, int nFloor )
 
 void CTextureManager::VitaTextureReport()
 {
-	const int nFloor = mat_picmip_min_size.GetInt();
-	int64 nActual = 0, nNow = 0, nFloor128 = 0, nPicmip2 = 0, nWorldFloor128 = 0, nWorld = 0, nModels = 0;
-	int nCount = 0, nCountWorld = 0;
+	const int nPicmip = g_config.skipMipLevels;
+	int64 nActual = 0, nNow = 0, nFloor128 = 0, nPicmip2 = 0, nWorld = 0, nWorldLow = 0, nChars = 0, nCharsLow = 0;
+	int nCount = 0, nCountWorld = 0, nCountChars = 0;
 	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
 	{
 		ITextureInternal *pTex = m_TextureList[i];
 		if ( !pTex || pTex->IsError() || pTex->IsRenderTarget() || pTex->IsProcedural() || pTex->GetMappingWidth() <= 0 || pTex->GetActualWidth() <= 0 )
 			continue;
-		const bool bModel = !V_strnicmp( pTex->GetName(), "models/", 7 );
 		const int nImages = MAX( pTex->GetNumAnimationFrames(), 1 ) * ( pTex->IsCubeMap() ? 6 : 1 );
 		const int nThis = ImageLoader::GetMemRequired( pTex->GetActualWidth(), pTex->GetActualHeight(), MAX( pTex->GetActualDepth(), 1 ), pTex->GetImageFormat(), pTex->IsMipmapped() ) * nImages;
-		const int nNowEst = VitaTextureBytes( pTex, 3, nFloor );
-		const int nAt128 = VitaTextureBytes( pTex, 3, MAX( nFloor, 128 ) );
 		nActual += nThis;
-		nNow += nNowEst;
-		nFloor128 += nAt128;
-		nPicmip2 += VitaTextureBytes( pTex, 2, nFloor );
-		nWorldFloor128 += bModel ? nNowEst : nAt128;
-		( bModel ? nModels : nWorld ) += nThis;
+		nNow += VitaTextureBytes( pTex, nPicmip, -1 );
+		nFloor128 += VitaTextureBytes( pTex, nPicmip, -1, 128 );
+		nPicmip2 += VitaTextureBytes( pTex, 2, -1 );
 		nCount++;
-		nCountWorld += !bModel;
+		if ( VitaIsWorldTexture( pTex->GetName(), pTex->GetFlags() ) )
+		{
+			nCountWorld++;
+			nWorld += nThis;
+			nWorldLow += VitaTextureBytes( pTex, nPicmip, 0 );
+		}
+		else if ( VitaIsCharacterTexture( pTex->GetName(), pTex->GetFlags() ) )
+		{
+			nCountChars++;
+			nChars += nThis;
+			nCharsLow += VitaTextureBytes( pTex, nPicmip, 0 );
+		}
 	}
-	Msg( "[vita] textures: %d (%d world), %.1f MB loaded (estimated %.1f: world %.1f, models %.1f); sharper: floor 128 %.1f MB, world floor 128 %.1f MB, mat_picmip 2 %.1f MB\n",
-		nCount, nCountWorld, nActual / 1048576.0, nNow / 1048576.0, nWorld / 1048576.0, nModels / 1048576.0,
-		nFloor128 / 1048576.0, nWorldFloor128 / 1048576.0, nPicmip2 / 1048576.0 );
+	Msg( "[vita] textures: %d, %.1f MB loaded (estimated %.1f); detail %d: world %d %.1f MB (Low %.1f), characters %d %.1f MB (Low %.1f); sharper: floor 128 %.1f MB, mat_picmip 2 %.1f MB\n",
+		nCount, nActual / 1048576.0, nNow / 1048576.0, vita_texture_detail.GetInt(),
+		nCountWorld, nWorld / 1048576.0, nWorldLow / 1048576.0, nCountChars, nChars / 1048576.0, nCharsLow / 1048576.0,
+		nFloor128 / 1048576.0, nPicmip2 / 1048576.0 );
 }
 
-CON_COMMAND( vita_texture_report, "Vita: texture memory now and at sharper texture settings" )
+CON_COMMAND( vita_texture_report, "Vita: texture memory now and at other texture settings" )
 {
 	s_TextureManager.VitaTextureReport();
+}
+
+// Texture detail at a map or save load (engine cl_main.cpp CL_FullyConnected,
+// right after the previous map's unused models, materials and textures are
+// freed): textures the previous map left loaded (shared with this one, or
+// the same map's save) keep the floors they loaded with, so the world and
+// character ones whose floor has changed are reloaded here, under the loading
+// screen. Never ReloadTextures: it recreates the render targets and reloads
+// every texture at once. A line when textures were reloaded. There is no
+// VRAM guard: the launcher logs each load's lowest VRAM free (so_loader.cpp
+// so_vram_watch_swap), which says whether Medium fits
+void CTextureManager::VitaApplyTextureDetail()
+{
+	// downloads belong to the thread that owns the device: the main thread,
+	// rendering not queued (loads run single-threaded, engine gl_screen.cpp)
+	if ( !ThreadInMainThread() || MaterialSystem()->GetThreadMode() != MATERIAL_SINGLE_THREADED || !g_pShaderAPI->CanDownloadTextures() )
+	{
+		Msg( "[vita] texture detail: textures from the last map not checked (rendering queued or device busy)\n" );
+		return;
+	}
+	const double flStart = Plat_FloatTime();
+	int nReloaded = 0;
+	int64 nBefore = 0, nAfter = 0;
+	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
+	{
+		ITextureInternal *pTex = m_TextureList[i];
+		if ( !pTex || pTex->IsRenderTarget() || pTex->IsProcedural() || pTex->GetReferenceCount() <= 0 )
+			continue;
+		const int nBytes = pTex->GetApproximateVidMemBytes();
+		if ( VitaReloadForTextureDetail( pTex ) )
+		{
+			nReloaded++;
+			nBefore += nBytes;
+			nAfter += pTex->GetApproximateVidMemBytes();
+		}
+	}
+	if ( nReloaded )
+		Msg( "[vita] texture detail %d: %d textures from the last map reloaded at their new floors, %.1f -> %.1f MB in %.0f ms\n",
+			vita_texture_detail.GetInt(), nReloaded, nBefore / 1048576.0, nAfter / 1048576.0,
+			( Plat_FloatTime() - flStart ) * 1000.0 );
+}
+
+// For the engine (dlsym): see above
+DLL_EXPORT void VitaTextureDetailApply()
+{
+	s_TextureManager.VitaApplyTextureDetail();
 }
 #endif
 

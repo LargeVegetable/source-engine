@@ -1927,6 +1927,20 @@ void CSaveRestore::RestoreClientState( char const *fileName, bool adjacent )
 
 	g_ClientDLL->Restore( pSaveData, false );
 
+#ifdef PLATFORM_VITA
+	// The decal list is always written (r_decals 0 still keeps the latest
+	// impact decal), so read past it whatever r_decals says: skipping it left
+	// the music list reading decal data ("Expected MUSICLIST found DECALLIST",
+	// "save file is suspect") and the music playing at the save didn't resume
+	for ( int i = 0; i < sections.decalcount; i++ )
+	{
+		decallist_t entry;
+		g_ClientDLL->SaveReadFields( pSaveData, "DECALLIST", &entry, NULL, decallist_t::m_DataMap.dataDesc, decallist_t::m_DataMap.dataNumFields );
+
+		if ( r_decals.GetInt() )
+			ReapplyDecal( adjacent, table, &entry );
+	}
+#else
 	if ( r_decals.GetInt() )
 	{
 		for ( int i = 0; i < sections.decalcount; i++ )
@@ -1937,6 +1951,7 @@ void CSaveRestore::RestoreClientState( char const *fileName, bool adjacent )
 			ReapplyDecal( adjacent, table, &entry );
 		}
 	}
+#endif
 
 	for ( int i = 0; i < sections.musiccount; i++ )
 	{

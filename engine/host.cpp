@@ -1872,23 +1872,26 @@ void Host_ReadConfiguration()
 	// Low-cost settings, applied over whatever config.cfg holds: no
 	// shadows or per-model world lights (dynamic lights stay on: the
 	// flashlight is one, r_newflashlight 0; models use the
-	// ambient cube; r_worldlights 1 cost more than it looked), no water
-	// reflections, 3D skybox, detail
-	// props, decals, flecks, brass, splashes, bloom, tonemapping or motion
-	// blur; facial animation only within r_vita_flex_dist (l_studio.cpp);
+	// ambient cube, averaged over time for static and lightstyle light,
+	// l_studio.cpp; r_worldlights 1 cost more than it looked), no water
+	// reflection or refraction views (water draws Valve's cheap envmap
+	// pass, stdshaders/water.cpp), 3D skybox, detail props, decals, flecks, brass, bloom,
+	// tonemapping or motion blur (water splashes stay, throttled in
+	// fx_water.cpp); facial animation only within r_vita_flex_dist (l_studio.cpp);
 	// models skip their top LOD (r_rootlod 1) and pick LODs by distance
 	// (r_lod -1; 2 forces the old low detail); cheaper sound (no room
 	// DSP, low-quality resampling) and fewer ragdolls and gibs. Textures are
-	// at 1/8 size per axis (mat_picmip 3; 2 and 4 work from vita_user.cfg),
-	// trilinear filtered, and the world is lightmapped (mat_fullbright 1 turns lighting off); bump,
+	// at 1/8 size per axis (mat_picmip 3; 2 and 4 work from vita_user.cfg)
+	// down to size floors (ctexture.cpp; Options > Video > Texture detail
+	// raises the world and character ones), trilinear filtered, and the world is lightmapped (mat_fullbright 1 turns lighting off); bump,
 	// specular and the rest are forced off in CMaterialSystem::OverrideConfig.
 	Cbuf_AddText(
 		"r_shadows 0; r_shadowrendertotexture 0; r_shadowmaxrendered 0; r_flashlightdepthtexture 0;"
-		"r_dynamic 1; r_worldlights 0; r_ambientboost 0; r_lightaverage 0;"
+		"r_dynamic 1; r_worldlights 0; r_ambientboost 0; r_lightaverage 1;"
 		"r_waterforceexpensive 0; r_waterforcereflectentities 0; r_WaterDrawReflection 0; r_WaterDrawRefraction 0;"
 		"r_3dsky 0; r_DrawDetailProps 0; cl_detaildist 0; cl_detailfade 0;"
 		"r_decals 0; mp_decals 0; r_drawmodeldecals 0; r_decalstaticprops 0;"
-		"r_drawflecks 0; cl_ejectbrass 0; cl_show_splashes 0;"
+		"r_drawflecks 0; cl_ejectbrass 0; cl_show_splashes 1;"
 		"mat_disable_bloom 1; mat_motion_blur_enabled 0; mat_colorcorrection 0; mat_hdr_level 0;"
 		"r_teeth 1; r_flex 1; flex_smooth 1; r_rootlod 1; r_lod -1;"
 		"dsp_slow_cpu 1; snd_pitchquality 0; snd_spatialize_roundrobin 1;"

@@ -179,11 +179,84 @@ ConVar mat_picmip_min_size( "mat_picmip_min_size", "64", FCVAR_NONE, "Vita: mat_
 ConVar mat_picmip_alphatest_min_size( "mat_picmip_alphatest_min_size", "256", FCVAR_NONE, "Vita: the same floor for the base textures of alpha-tested materials (fences, grates, foliage), whose thin holes picmip blurs away" );
 ConVar mat_picmip_viewmodel_min_size( "mat_picmip_viewmodel_min_size", "256", FCVAR_NONE, "Vita: the same floor for first-person weapon and hand textures (models/weapons/v_*), which fill much of the screen" );
 ConVar mat_vita_texture_max_kb( "mat_vita_texture_max_kb", "4096", FCVAR_NONE, "Vita: textures whose whole image (all frames and faces) is bigger than this load at half size, down to 64 pixels (0 = no cap)" );
+// Options > Video > Texture detail (gameui VitaMenu.cpp): higher floors for
+// world and character textures, a few MB of VRAM and no per-frame cost.
+// Textures take them as they load; at the next map or save load, the ones the
+// last map left loaded are reloaded if their floor changed (texturemanager.cpp
+// VitaTextureDetailApply)
+ConVar vita_texture_detail( "vita_texture_detail", "1", FCVAR_NONE, "Vita: texture detail, 0 Low (the base floors above), 1 Medium (world textures at least 128, character models 256); applies at the next map or save load", true, 0, true, 1 );
+ConVar mat_picmip_world_min_size( "mat_picmip_world_min_size", "0", FCVAR_NONE, "Vita: picmip floor for world textures (brushes, displacements, overlays); 0 = from vita_texture_detail (Low none, Medium 128)" );
+ConVar mat_picmip_character_min_size( "mat_picmip_character_min_size", "0", FCVAR_NONE, "Vita: picmip floor for character model textures (people, soldiers, zombies); 0 = from vita_texture_detail (Low none, Medium 256)" );
 // Set by CBaseShader::LoadTexture (shaderlib/BaseShader.cpp) on the base
 // texture of an alpha-tested material; an unused VTF flag bit
 #define TEXTUREFLAGS_VITA_ALPHATEST TEXTUREFLAGS_UNUSED_00400000
-// A VTF's own flags with that bit cleared (old tools may have set it)
-#define VITA_VTF_FLAGS( pVTF ) ( ( pVTF )->Flags() & ~TEXTUREFLAGS_VITA_ALPHATEST )
+// Set by CShaderSystem::LoadTexture (shadersystem.cpp) on the textures of
+// world materials, not their bump or cube maps; another unused bit
+#define TEXTUREFLAGS_VITA_WORLD TEXTUREFLAGS_UNUSED_01000000
+// A VTF's own flags with those bits cleared (old tools may have set them)
+#define VITA_VTF_FLAGS( pVTF ) ( ( pVTF )->Flags() & ~( TEXTUREFLAGS_VITA_ALPHATEST | TEXTUREFLAGS_VITA_WORLD ) )
+
+// Texture detail's world class: world textures, except detail textures
+// (tiled overlays at low strength) and the flashlight cookie
+bool VitaIsWorldTexture( const char *pName, unsigned int nFlags )
+{
+	return ( nFlags & TEXTUREFLAGS_VITA_WORLD ) && pName &&
+		V_strnicmp( pName, "detail/", 7 ) && V_strnicmp( pName, "effects/flashlight", 18 );
+}
+
+// Texture detail's character class, by folder under materials/models: HL2's
+// people, soldiers, zombies and Dog. Synths, vehicles and small creatures are
+// left out (big sheets mostly seen from afar, or small on screen), and so are
+// eye textures, which are small. No Portal folder matches
+static const char *s_pszVitaCharacterDirs[] =
+{
+	"humans/", "alyx/", "barney/", "kleiner/", "eli/", "mossman/", "breen/", "gman/", "monk/", "odessa/",
+	"vortigaunt", "police/", "combine_soldier/", "combine_super_soldier/", "zombie", "dog/",
+};
+
+bool VitaIsCharacterTexture( const char *pName, unsigned int nFlags )
+{
+	if ( !pName || V_strnicmp( pName, "models/", 7 ) )
+		return false;
+	for ( int i = 0; i < ARRAYSIZE( s_pszVitaCharacterDirs ); i++ )
+	{
+		if ( !V_strnicmp( pName + 7, s_pszVitaCharacterDirs[i], V_strlen( s_pszVitaCharacterDirs[i] ) ) )
+		{
+			const char *pFile = V_UnqualifiedFileName( pName );
+			return V_strnicmp( pFile, "eye", 3 ) && !V_stristr( pFile, "iris" ) && !V_stristr( pFile, "pupil" );
+		}
+	}
+	return false;
+}
+
+// A class floor at a Texture detail level (nDetail -1: the current one, where
+// a nonzero mat_picmip_*_min_size overrides the level's value)
+static int VitaClassMinSize( const ConVar &minSize, int nDetail, int nMedium )
+{
+	if ( nDetail < 0 )
+	{
+		if ( minSize.GetInt() > 0 )
+			return minSize.GetInt();
+		nDetail = vita_texture_detail.GetInt();
+	}
+	return nDetail >= 1 ? nMedium : 0;
+}
+
+// The size mat_picmip stops halving a texture at (ComputeMipSkipCount; the
+// report and the Texture detail reload in texturemanager.cpp use it too)
+int VitaPicmipMinSize( const char *pName, unsigned int nFlags, int nDetail )
+{
+	int nMinSize = mat_picmip_min_size.GetInt();
+	if ( nFlags & TEXTUREFLAGS_VITA_ALPHATEST )
+		nMinSize = MAX( nMinSize, mat_picmip_alphatest_min_size.GetInt() );
+	if ( pName && !V_strnicmp( pName, "models/weapons/v_", 17 ) )
+		nMinSize = MAX( nMinSize, mat_picmip_viewmodel_min_size.GetInt() );
+	if ( VitaIsWorldTexture( pName, nFlags ) )
+		nMinSize = MAX( nMinSize, VitaClassMinSize( mat_picmip_world_min_size, nDetail, 128 ) );
+	if ( VitaIsCharacterTexture( pName, nFlags ) )
+		nMinSize = MAX( nMinSize, VitaClassMinSize( mat_picmip_character_min_size, nDetail, 256 ) );
+	return MAX( nMinSize, 4 );
+}
 #else
 #define VITA_VTF_FLAGS( pVTF ) ( ( pVTF )->Flags() )
 #endif
@@ -421,6 +494,13 @@ public:
 	virtual bool MakeResident( ResidencyType_t newResidence );
 	virtual void UpdateLodBias();
 
+#ifdef PLATFORM_VITA
+	// Texture detail at a load (texturemanager.cpp): reloads a world or
+	// character texture whose picmip floor changed since it loaded and with
+	// it its size; true if it did
+	bool VitaReloadForTextureDetail();
+#endif
+
 protected:
 	bool IsDepthTextureFormat( ImageFormat fmt );
 	void ReconstructTexture( bool bCopyFromCurrent );
@@ -558,6 +638,9 @@ protected:
 
 	unsigned short m_nDesiredDimensionLimit;	// part of texture exclusion
 	unsigned short m_nActualDimensionLimit;		// value not necessarily accurate, but mismatch denotes dirty state
+#ifdef PLATFORM_VITA
+	unsigned short m_nVitaPicmipFloor;	// VitaPicmipMinSize when it last loaded from its file (0: never)
+#endif
 
 	// m_pStreamingJob is refcounted, but it is not safe to call SafeRelease directly on it--you must call 
 	// CancelStreamingJob to ensure that releasing it doesn't cause a crash.
@@ -1063,6 +1146,9 @@ CTexture::CTexture() : m_ImageFormat( IMAGE_FORMAT_UNKNOWN )
 
 	m_nDesiredDimensionLimit = 0;
 	m_nActualDimensionLimit = 0;
+#ifdef PLATFORM_VITA
+	m_nVitaPicmipFloor = 0;
+#endif
 
 	memset( &m_cachedFileLodSettings, 0, sizeof( m_cachedFileLodSettings ) );
 
@@ -3247,6 +3333,52 @@ void CTexture::ReloadFilesInList( IFileList *pFilesToReload )
 	}
 }
 
+#ifdef PLATFORM_VITA
+// The width mat_picmip leaves a w x h texture at with this floor (the halving
+// loop in ComputeMipSkipCount, from the file's size)
+static int VitaPicmipWidth( int w, int h, int nMinSize )
+{
+	for ( int i = 0; i < g_config.skipMipLevels; i++ )
+	{
+		if ( w > nMinSize && h > nMinSize )
+		{
+			w >>= 1;
+			h >>= 1;
+		}
+	}
+	return w;
+}
+
+bool CTexture::VitaReloadForTextureDetail()
+{
+	if ( !m_nVitaPicmipFloor || IsError() || !HasBeenAllocated() || ( m_nFlags & TEXTUREFLAGS_STREAMABLE ) ||
+		!( VitaIsWorldTexture( GetName(), m_nFlags ) || VitaIsCharacterTexture( GetName(), m_nFlags ) ) )
+		return false;
+	const int nMinSize = VitaPicmipMinSize( GetName(), m_nFlags, -1 );
+	if ( nMinSize == m_nVitaPicmipFloor )
+		return false;
+	// at or under both floors, or not picmipped: the size stays, no reload
+	// (if the last load got the size its floor gives; a VTF LOD clamp or the
+	// 4 MB cap may have made it smaller, so then reload to be sure)
+	const int nOldWidth = VitaPicmipWidth( m_dimsMapping.m_nWidth, m_dimsMapping.m_nHeight, m_nVitaPicmipFloor );
+	if ( ( m_nFlags & TEXTUREFLAGS_NOLOD ) ||
+		( nOldWidth == m_dimsActual.m_nWidth && nOldWidth == VitaPicmipWidth( m_dimsMapping.m_nWidth, m_dimsMapping.m_nHeight, nMinSize ) ) )
+	{
+		m_nVitaPicmipFloor = nMinSize;
+		return false;
+	}
+	Download();
+	return true;
+}
+
+// For texturemanager.cpp, which sees only ITextureInternal
+bool VitaReloadForTextureDetail( ITextureInternal *pTexture )
+{
+	CTexture *pTex = dynamic_cast< CTexture * >( pTexture );
+	return pTex && pTex->VitaReloadForTextureDetail();
+}
+#endif
+
 //-----------------------------------------------------------------------------
 // Loads the texture bits from a file.
 //-----------------------------------------------------------------------------
@@ -3314,6 +3446,10 @@ IVTFTexture *CTexture::LoadTextureBitsFromFile( char *pCacheFileName, char **ppR
 		// Not illegal, just needs investigation.
 		Assert( stripFlags == 0 );
 	}
+#ifdef PLATFORM_VITA
+	// the floor this load used (same name and flags), for VitaReloadForTextureDetail
+	m_nVitaPicmipFloor = VitaPicmipMinSize( GetName(), m_nFlags, -1 );
+#endif
 
 	if ( m_pStreamingVTF )
 		ComputeActualSize( false, pVTFTexture, ( m_nFlags & TEXTUREFLAGS_STREAMABLE ) != 0 );
@@ -4423,14 +4559,9 @@ int ComputeMipSkipCount( const char* pName, const TexDimensions_t& mappingDims, 
 #ifdef PLATFORM_VITA
 			// picmip 3 took 128x128 textures such as glass, decals and signs
 			// to 16x16 (window glass drew as blue/white blocks); stop
-			// halving once the shorter side reaches mat_picmip_min_size
-			extern ConVar mat_picmip_min_size, mat_picmip_alphatest_min_size, mat_picmip_viewmodel_min_size;
-			int nMinSize = mat_picmip_min_size.GetInt();
-			if ( nFlags & TEXTUREFLAGS_VITA_ALPHATEST )
-				nMinSize = MAX( nMinSize, mat_picmip_alphatest_min_size.GetInt() );
-			if ( pName && !V_strnicmp( pName, "models/weapons/v_", 17 ) )
-				nMinSize = MAX( nMinSize, mat_picmip_viewmodel_min_size.GetInt() );
-			nMinSize = MAX( nMinSize, 4 );
+			// halving once the shorter side reaches mat_picmip_min_size (or
+			// its class's floor: alpha-tested, viewmodel, Texture detail)
+			const int nMinSize = VitaPicmipMinSize( pName, nFlags, -1 );
 #else
 			const int nMinSize = 4;
 #endif

@@ -4,7 +4,7 @@ An unofficial port of the Source engine to the PlayStation Vita that runs **Half
 
 **No game files are included.** You need Half-Life 2 on Steam and you copy its files to your Vita yourself: see **[INSTALL_VITA.md](INSTALL_VITA.md)**.
 
-**Version 0.1.2-beta.** [Download it from the releases page](../../releases/latest).
+**Version 0.1.3-beta.** [Download it from the releases page](../../releases/latest).
 
 ## Status
 
@@ -20,10 +20,13 @@ An unofficial port of the Source engine to the PlayStation Vita that runs **Half
 - All chapters can be unlocked from New Game (△).
 - Every action can be remapped, including to the D-pad, SELECT, and the left and right halves of both the rear touchpad and the touchscreen. Look sensitivity, look acceleration and invert look too.
 - Field of view from 55 to 90 (Options > Video).
+- Texture detail (Options > Video): Medium, the default, keeps world and character textures sharper; Low uses less video memory. A change applies at the next map or save load.
 - Optional button driving for the airboat and the buggy: ✕ accelerates, ○ reverses (Options > Controls).
 - Facial animation and lip sync, with a distance setting for performance.
 - A larger HUD (three sizes) and PlayStation button symbols in on-screen hints.
 - Video options for the heavy effects: distant small props, and the smoke above fires.
+- Water with reflections and splashes.
+- Lighting on characters and objects changes smoothly as they move between light and shade.
 - If something is missing at launch (kubridge, the shader compiler, the game files, or game files from the wrong Steam build), a message says what and how to fix it.
 - Rear touchpad crouch (left half) and sprint (right half).
 - Optional gyro aiming: turn and tilt the Vita to aim, on top of the right stick, with a sensitivity setting (Options > Controls).
@@ -84,8 +87,8 @@ The Options menu covers the usual settings. Two files cover the rest:
 
 ## Known issues
 
-- Rarely, the game can crash or stop responding while loading the next map. Save often, and if it happens, please report it with the logs below.
-- Reflections and specular highlights from cube maps are off: vitaGL doesn't support mipmapped cube maps yet.
+- Rarely, the game can crash or freeze while loading the next map (0.1.3 fixes one cause of the freezes). Save often, and if it happens, please report it with the logs below.
+- Reflections and specular highlights from cube maps are off on most surfaces. Water does reflect, from pre-made cube maps, so its reflections don't show characters or moving objects.
 - The intro videos don't play.
 - Suspending and resuming (pressing PS mid-game, or putting the Vita to sleep) hasn't been tested much. Save before you do.
 - Saves made with the anniversary build don't load on the Pre-20th Anniversary build.
@@ -94,6 +97,8 @@ The Options menu covers the usual settings. Two files cover the rest:
 ## Reporting bugs
 
 If something is missing at launch, the game shows a message saying what. The last line of `ux0:data/hl2_vita_boot.txt` says the same.
+
+If the game freezes, wait a minute before closing it: it writes a report to the end of `ux0:data/hl2_vita_boot.txt`.
 
 For more detailed logs, add `-vitadebug` to `ux0:data/halflife2/commandline.txt` (create the file if it isn't there) and play until the problem happens again. Remove it afterwards: the extra logging costs a little performance.
 
@@ -141,6 +146,7 @@ The port's own code is mostly in `launcher_vita/` (ELF loader, memory, crash log
 - [Rinnegatamante](https://github.com/Rinnegatamante), for vitaGL, vitashark and ShaRKBR33D.
 - [bythos14](https://github.com/bythos14/kubridge) and [TheFloW](https://github.com/TheOfficialFloW), for kubridge.
 - The [VitaSDK](https://vitasdk.org) team, and the SDL2, freetype and minimp3 projects.
+- [highda](https://github.com/highda), for fixes and speed-ups to the port's threading, loading, sound, saving and shader preparation.
 
 ## Legal
 

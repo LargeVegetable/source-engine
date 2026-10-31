@@ -74,6 +74,9 @@
 
 #include "language.h"
 #include "igame.h"
+#ifdef PLATFORM_VITA
+#include <dlfcn.h>
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -1052,6 +1055,19 @@ void CL_FullyConnected( void )
 	// loading completed
 	// can NOW safely purge unused models and their data hierarchy (materials, shaders, etc)
 	modelloader->PurgeUnusedModels();
+
+#ifdef PLATFORM_VITA
+	// Options > Video > Texture detail: textures the previous map left loaded
+	// keep the picmip floors they loaded with; materialsystem reloads the ones
+	// whose floor has changed now that the unused ones are freed, under the
+	// loading screen (texturemanager.cpp VitaTextureDetailApply)
+	{
+		typedef void ( *VitaTextureDetailApplyFn_t )( void );
+		static VitaTextureDetailApplyFn_t s_pfnApply = (VitaTextureDetailApplyFn_t)dlsym( RTLD_DEFAULT, "VitaTextureDetailApply" );
+		if ( s_pfnApply )
+			s_pfnApply();
+	}
+#endif
 
 	// Purge the preload stores, oreder is critical
 	g_pMDLCache->ShutdownPreloadData();

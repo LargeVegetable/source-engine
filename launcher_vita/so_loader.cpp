@@ -941,6 +941,35 @@ extern "C" void so_perf_read( int counter, uint64_t *pCalls, uint64_t *pMicrosec
 	*pMicroseconds = __atomic_load_n( &s_PerfTime[counter], __ATOMIC_RELAXED );
 }
 
+// VRAM free at each load's lowest point, one line per load: from the map
+// load's start to 30 swaps after the player gets control (the first frame
+// uploads most of the new map's textures). Sampled before each swap, on the
+// thread that owns GL: the frame's allocations are made by then, and the
+// textures freed since the last swap still hold their memory (vitaGL frees
+// them in vglSwapBuffers), so each sample is that frame's low point.
+// Texture detail Medium needs about 15-20 MB left at loads
+extern "C" size_t vglMemFree( int type );	// vitaGL; 0: VRAM
+static volatile int s_nVramWatch;	// 0 off, 1 loading, 2 after control
+static int s_nVramWatchSwaps;
+static size_t s_nVramLow;
+static char s_szVramMap[64];
+
+extern "C" void so_vram_watch_swap( void )
+{
+	const int nWatch = s_nVramWatch;
+	if ( !nWatch )
+		return;
+	const size_t nFree = vglMemFree( 0 );
+	if ( nFree < s_nVramLow )
+		s_nVramLow = nFree;
+	if ( nWatch == 2 && ++s_nVramWatchSwaps >= 30 )
+	{
+		so_trace( "[vita] VRAM free at the lowest point of the %s load: %u MB (%u MB now)", s_szVramMap,
+			(unsigned)( s_nVramLow >> 20 ), (unsigned)( nFree >> 20 ) );
+		s_nVramWatch = 0;
+	}
+}
+
 // Load checkpoints: the main menu, each map load's start, its material
 // precache (where Source creates the shaders) and the player getting
 // control. Each line gives the shader compiles since the previous one, so
@@ -950,7 +979,16 @@ static void ShaderRecordMap( const char *pszMap );
 extern "C" void so_load_mark( const char *what )
 {
 	if ( !strncmp( what, "load ", 5 ) )
+	{
 		ShaderRecordMap( what + 5 );
+		snprintf( s_szVramMap, sizeof( s_szVramMap ), "%s", what + 5 );
+		s_nVramLow = (size_t)-1;
+		s_nVramWatchSwaps = 0;
+		__sync_synchronize();
+		s_nVramWatch = 1;
+	}
+	else if ( !strcmp( what, "in control" ) && s_nVramWatch == 1 )
+		s_nVramWatch = 2;
 	static uint64_t s_nLastCalls, s_nLastTime, s_nLastAt;
 	static char s_szLast[64] = "launch";
 	uint64_t calls, time;
@@ -1670,6 +1708,19 @@ extern "C" int __wrap_usleep( useconds_t usec )
 	volatile int marker = 0;
 	SoWait *w = WaitBegin( "sleep", NULL, __builtin_return_address( 0 ), &marker );
 	const int result = __real_usleep( usec );
+	WaitEnd( w );
+	return result;
+}
+
+// Kernel event flags: tier0's CThreadEvent and WaitForMultiple
+// (threadtools.cpp) and the job threads' wake flags (vstdlib/jobthread.cpp)
+// wait on them; the object is the flag's id
+extern "C" int __real_sceKernelWaitEventFlag( int evid, unsigned int bits, unsigned int wait, unsigned int *outBits, SceUInt *timeout );
+extern "C" int __wrap_sceKernelWaitEventFlag( int evid, unsigned int bits, unsigned int wait, unsigned int *outBits, SceUInt *timeout )
+{
+	volatile int marker = 0;
+	SoWait *w = WaitBegin( "evflag", (const void *)(uintptr_t)evid, __builtin_return_address( 0 ), &marker );
+	const int result = __real_sceKernelWaitEventFlag( evid, bits, wait, outBits, timeout );
 	WaitEnd( w );
 	return result;
 }

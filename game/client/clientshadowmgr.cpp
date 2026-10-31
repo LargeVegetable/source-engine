@@ -81,6 +81,7 @@
 #include "toolframework_client.h"
 #include "bonetoworldarray.h"
 #include "cmodel.h"
+#include "vita_perf.h"
 
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -2926,6 +2927,21 @@ void CClientShadowMgr::PreRender()
 		return;
 	}
 
+#ifdef PLATFORM_VITA
+	VITA_SECTION_SCOPE( "cl shadows" );
+
+	// UpdateShadow skips shadows while r_shadows is 0; when it changes, run
+	// every shadow once so they all drop or rebuild their projection.
+	// PreRender runs once per view, hence the compare
+	static int s_nVitaShadows = -1;
+	int nVitaShadows = r_shadows.GetBool() ? 1 : 0;
+	if ( nVitaShadows != s_nVitaShadows )
+	{
+		s_nVitaShadows = nVitaShadows;
+		UpdateAllShadows();
+	}
+#endif
+
 	m_bUpdatingDirtyShadows = true;
 
 	unsigned short i = m_DirtyShadows.FirstInorder();
@@ -3088,6 +3104,25 @@ void CClientShadowMgr::UpdateShadow( ClientShadowHandle_t handle, bool force )
 		pRenderable->MarkShadowDirty( false );
 		return;
 	}
+
+#ifdef PLATFORM_VITA
+	// r_shadows 0 (the Vita default): the engine discards every projection
+	// (CShadowMgr::ProjectShadow), so skip the leaf walk, matrices and client
+	// leaf re-bucketing each moving caster costs per frame. Old leaf entries
+	// are dropped; the FLT_MAX position rebuilds it once PreRender sees
+	// r_shadows on; the cleared dirty flag lets movement queue it again.
+	// Before the falloff test so transparent shadows don't stay queued.
+	// Flashlights never get here (UpdateProjectedTextureInternal)
+	if ( !r_shadows.GetBool() )
+	{
+		shadowmgr->EnableShadow( shadow.m_ShadowHandle, false );
+		ClientLeafSystem()->ProjectShadow( shadow.m_ClientLeafShadowHandle, 0, NULL );
+		shadow.m_LastOrigin.Init( FLT_MAX, FLT_MAX, FLT_MAX );
+		shadow.m_LastAngles.Init( FLT_MAX, FLT_MAX, FLT_MAX );
+		pRenderable->MarkShadowDirty( false );
+		return;
+	}
+#endif
 
 	// FIXME: NOTE! Because this is called from PreRender, the falloff bias is
 	// off by a frame. We could move the code in PreRender to occur after world

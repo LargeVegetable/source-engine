@@ -48,6 +48,7 @@ int so_gyro_rates( float *pYaw, float *pPitch );	// client gyro aiming: rad/s, 0
 // Load checkpoints (engine, GameUI): the time, and the shader compiles and
 // their seconds since the previous checkpoint
 void so_load_mark( const char *what );
+void so_vram_watch_swap( void );	// main.cpp, before each swap: a load's lowest VRAM free
 void so_shader_compiles( uint64_t *pCalls, uint64_t *pMicroseconds );	// totals so far
 void so_perf_read( int counter, uint64_t *pCalls, uint64_t *pMicroseconds );	// any VITA_PERF_* counter
 void so_file_open_note( const char *path );	// filesystem_stdio: a file opened (long-frame line)

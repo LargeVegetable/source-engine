@@ -1389,6 +1389,8 @@ static const VitaOption_t s_VitaOptions[] =
 	{ TAB_VIDEO, OPT_CHOICE, "Field of view", "fov_desired", "55:55|60:60|65:65|70:70|75:75 (default)|80:80|85:85|90:90" },	// GitHub issue #10
 	{ TAB_VIDEO, OPT_CHOICE, "HUD size", "vita_hud_size", "0:Normal|1:Large|2:Larger" },	// client clientmode_shared.cpp
 	{ TAB_VIDEO, OPT_CHOICE, "Show FPS", "cl_showfps", "0:Off|1:On" },
+	// sharper world and character textures, at the next map or save load (materialsystem ctexture.cpp)
+	{ TAB_VIDEO, OPT_CHOICE, "Texture detail", "vita_texture_detail", "0:Low|1:Medium" },
 	{ TAB_VIDEO, OPT_FLEX, "Facial animation" },
 	// static props under this radius on screen aren't drawn (client viewrender.cpp)
 	{ TAB_VIDEO, OPT_CHOICE, "Distant props", "vita_staticprop_minpixels", "0:All|3:Normal|6:Fewer" },
@@ -1433,7 +1435,7 @@ static const char *s_pszVitaSavedCvars[] =
 	"skill", "closecaption", "cc_subtitles", "crosshair", "volume", "snd_musicvolume", "cl_showfps",
 	"r_flex", "r_vita_flex_dist", "joy_yawsensitivity", "joy_pitchsensitivity", "joy_inverty",
 	"vita_staticprop_minpixels", "vita_hud_size", "vita_fire_smoke", "vita_gyro", "vita_gyro_sensitivity",
-	"vita_look_accel", "fov_desired", "vita_vehicle_buttons",
+	"vita_look_accel", "fov_desired", "vita_vehicle_buttons", "vita_texture_detail",
 };
 
 // The remappable buttons (START stays the menu button)
@@ -1559,8 +1561,23 @@ protected:
 			m_Hints.AddToTail( hint );
 			return;
 		}
+		// Texture detail changes textures as they load: say when
+		if ( m_RowOption.IsValidIndex( m_nSel ) )
+		{
+			const VitaOption_t &opt = s_VitaOptions[m_RowOption[m_nSel]];
+			if ( opt.m_nType == OPT_CHOICE && !V_strcmp( opt.m_pszCvar, "vita_texture_detail" ) )
+			{
+				const VitaHint_t note = { VG_NONE, "Applies at the next load" };
+				m_Hints.AddToTail( note );
+			}
+		}
 		const VitaHint_t hints[] = { { VG_LR, "Tab" }, { VG_CROSS, "Change" }, { VG_CIRCLE, "Back" } };
 		m_Hints.AddMultipleToTail( 3, hints );
+	}
+
+	virtual void OnSelectionChanged()
+	{
+		UpdateHints();
 	}
 
 	void FillValue( const VitaOption_t &opt, VitaRow_t &row, int nRow )

@@ -21,6 +21,21 @@
 static ConVar r_waterforceexpensive( "r_waterforceexpensive", "0", FCVAR_ARCHIVE );
 #endif
 
+#ifdef PLATFORM_VITA
+// The reflection and refraction views are never rendered on the Vita
+// (engine/host.cpp sets r_WaterDrawReflection/r_WaterDrawRefraction 0), so the
+// expensive pass sampled render targets holding only zeros: black water. With
+// this on, water materials loaded afterwards (the next map) use Valve's cheap
+// pass instead, fog colour blended into the envmap by fresnel, as distant water
+// does on PC; the client already takes $forcecheap and sets up no extra views
+static ConVar r_vita_water_cheap( "r_vita_water_cheap", "1", FCVAR_NONE,
+	"Vita: draw water with the cheap envmap pass (applies to materials loaded afterwards)" );
+
+// $forcecheap value marking a material forced by r_vita_water_cheap, so the
+// draw keeps that material's colour handling without reading the convar
+#define VITA_WATER_FORCED_CHEAP 2
+#endif
+
 DEFINE_FALLBACK_SHADER( Water, Water_DX9_HDR )
 
 BEGIN_VS_SHADER( Water_DX90, 
@@ -100,6 +115,24 @@ BEGIN_VS_SHADER( Water_DX90,
 			params[REFLECTBLENDFACTOR]->SetFloatValue( 1.0f );
 		}
 
+#ifdef PLATFORM_VITA
+		// Every water material, including the base .vmts PREPARE SHADERS loads,
+		// so it prepares the combos the maps' patched copies use. Skipped: water
+		// with a $basetexture (the expensive pass draws it lit; the cheap one
+		// can't) and decals (no cheap pass). A literal env_cubemap would sample
+		// whichever cubemap a model bound last, and without an $envmap the cheap
+		// pass isn't drawn, so both take the engine's default cubemap
+		// (SHADER_INIT falls back if it's missing)
+		if ( r_vita_water_cheap.GetBool() && !params[BASETEXTURE]->IsDefined() && !IS_FLAG_SET( MATERIAL_VAR_DECAL ) )
+		{
+			if ( !params[ENVMAP]->IsDefined() || !V_stricmp( params[ENVMAP]->GetStringValue(), "env_cubemap" ) )
+			{
+				params[ENVMAP]->SetStringValue( "engine/defaultcubemap" );
+			}
+			params[FORCECHEAP]->SetIntValue( VITA_WATER_FORCED_CHEAP );
+		}
+#endif
+
 		// By default, we're force expensive on dx9.  NO WE DON'T!!!!
 		if( !params[FORCEEXPENSIVE]->IsDefined() )
 		{
@@ -152,6 +185,18 @@ BEGIN_VS_SHADER( Water_DX90,
 		{
 			LoadCubeMap( ENVMAP, TEXTUREFLAGS_SRGB );
 		}
+#ifdef PLATFORM_VITA
+		if ( params[FORCECHEAP]->GetIntValue() == VITA_WATER_FORCED_CHEAP )
+		{
+			// A missing cube (engine/defaultcubemap, or a map's patched one) would
+			// bind the error texture: the bound local cubemap is the better fallback
+			if ( params[ENVMAP]->IsTexture() && params[ENVMAP]->GetTextureValue()->IsError() )
+			{
+				params[ENVMAP]->SetStringValue( "env_cubemap" );
+				LoadCubeMap( ENVMAP, TEXTUREFLAGS_SRGB );
+			}
+		}
+#endif
 		if ( params[NORMALMAP]->IsDefined() )
 		{
 			LoadBumpMap( NORMALMAP );
@@ -380,6 +425,13 @@ BEGIN_VS_SHADER( Water_DX90,
 	inline void DrawCheapWater( IMaterialVar **params, IShaderShadow* pShaderShadow, 
 		                        IShaderDynamicAPI* pShaderAPI, bool bBlend, bool bRefraction )
 	{
+#ifdef PLATFORM_VITA
+		// Without an sRGB-decode toggle in ToGL, the sRGB envmap is always sampled
+		// decoded (linear), not as gamma like the stock pass expects, which darkened
+		// the reflections. Blend in linear space and encode on write, as the
+		// expensive pass and LightmappedGeneric do: fog colour and tint go linear
+		bool bVitaLinear = ( params[FORCECHEAP]->GetIntValue() == VITA_WATER_FORCED_CHEAP );
+#endif
 		SHADOW_STATE
 		{
 			SetInitialShadowState( );
@@ -445,6 +497,13 @@ BEGIN_VS_SHADER( Water_DX90,
 				// we are writing linear values from this shader.
 				pShaderShadow->EnableSRGBWrite( true );
 			}
+#ifdef PLATFORM_VITA
+			else if ( bVitaLinear )
+			{
+				// also makes the shader API send the scene fog colour linear
+				pShaderShadow->EnableSRGBWrite( true );
+			}
+#endif
 
 			FogToFogColor();
 		}
@@ -460,6 +519,11 @@ BEGIN_VS_SHADER( Water_DX90,
 			}
 			pShaderAPI->BindStandardTexture( SHADER_SAMPLER6, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
 
+#ifdef PLATFORM_VITA
+			if ( bVitaLinear )
+				SetPixelShaderConstantGammaToLinear( 0, FOGCOLOR );
+			else
+#endif
 			SetPixelShaderConstant( 0, FOGCOLOR );
 
 			float cheapWaterStartDistance = params[CHEAPWATERSTARTDISTANCE]->GetFloatValue();
@@ -475,6 +539,11 @@ BEGIN_VS_SHADER( Water_DX90,
 
 			if( g_pConfig->bShowSpecular )
 			{
+#ifdef PLATFORM_VITA
+				if ( bVitaLinear )
+					SetPixelShaderConstantGammaToLinear( 2, REFLECTTINT, REFLECTBLENDFACTOR );
+				else
+#endif
 				SetPixelShaderConstant( 2, REFLECTTINT, REFLECTBLENDFACTOR );
 			}
 			else

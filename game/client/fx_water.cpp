@@ -16,6 +16,9 @@
 #include "tier0/vprof.h"
 #include "fx.h"
 #include "fx_water.h"
+#ifdef PLATFORM_VITA
+#include "view.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -32,6 +35,60 @@ CLIENTEFFECT_REGISTER_END()
 #define	SPLASH_MAX_SPEED	100.0f
 
 ConVar	cl_show_splashes( "cl_show_splashes", "1" );
+
+#ifdef PLATFORM_VITA
+// Splashes are on again on the Vita (cl_show_splashes 1, engine/host.cpp),
+// with limits. Every bullet that ends in water sends a 'gunshotsplash' (the
+// chopper's and airboat's guns: 10-20 a second at ~3 draws each), so those
+// draw at most one per interval, near the view, without the ripple quad.
+// Other splashes (objects, buggy wheels, env_splash; bursts of up to 5)
+// share a per-second cap; a skipped 'watersplash' leaves only its ripple.
+// Only drawn splashes play Physics.WaterSplash
+static ConVar r_vita_gunshot_splashes( "r_vita_gunshot_splashes", "1", FCVAR_NONE, "Vita: splashes where bullets hit water (1, default: throttled by r_vita_gunshot_splash_interval and _dist, no ripple; 0: off)" );
+static ConVar r_vita_gunshot_splash_interval( "r_vita_gunshot_splash_interval", "0.25", FCVAR_NONE, "Vita: seconds between bullet splashes; the ones in between are skipped (0 = every bullet)" );
+static ConVar r_vita_gunshot_splash_dist( "r_vita_gunshot_splash_dist", "1500", FCVAR_NONE, "Vita: no bullet splashes farther than this from the view (0 = any distance)" );
+static ConVar r_vita_splash_rate( "r_vita_splash_rate", "5", FCVAR_NONE, "Vita: at most this many other water splashes a second (objects, buggy wheels, env_splash), two at once; a skipped watersplash effect leaves its ripple (0 = no cap)" );
+
+static float s_flVitaNextGunshotSplash = 0.0f;
+static float s_flVitaSplashBudget = 0.0f;
+static float s_flVitaSplashBudgetTime = 0.0f;
+
+// realtime, not curtime: curtime restarts with each map and save
+static bool VitaGunshotSplashAllowed( const Vector &origin )
+{
+	if ( !r_vita_gunshot_splashes.GetBool() )
+		return false;
+
+	float flMaxDist = r_vita_gunshot_splash_dist.GetFloat();
+	if ( flMaxDist > 0.0f && origin.DistToSqr( MainViewOrigin() ) > flMaxDist * flMaxDist )
+		return false;
+
+	float flNow = gpGlobals->realtime;
+	if ( flNow < s_flVitaNextGunshotSplash )
+		return false;
+
+	s_flVitaNextGunshotSplash = flNow + r_vita_gunshot_splash_interval.GetFloat();
+	return true;
+}
+
+// Token bucket: refills at r_vita_splash_rate a second and holds two, so a
+// big object's centre splash and one corner splash both show
+static bool VitaSplashAllowed()
+{
+	float flRate = r_vita_splash_rate.GetFloat();
+	if ( flRate <= 0.0f )
+		return true;
+
+	float flNow = gpGlobals->realtime;
+	s_flVitaSplashBudget = MIN( 2.0f, s_flVitaSplashBudget + MAX( 0.0f, flNow - s_flVitaSplashBudgetTime ) * flRate );
+	s_flVitaSplashBudgetTime = flNow;
+	if ( s_flVitaSplashBudget < 1.0f )
+		return false;
+
+	s_flVitaSplashBudget -= 1.0f;
+	return true;
+}
+#endif
 
 static Vector s_vecSlimeColor( 46.0f/255.0f, 90.0f/255.0f, 36.0f/255.0f );
 
@@ -117,7 +174,22 @@ void FX_WaterRipple( const Vector &origin, float scale, Vector *pColor, float fl
 // Input  : &origin - 
 //			&normal - 
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+static void FX_GunshotSplashInternal( const Vector &origin, const Vector &normal, float scale, bool bRipple );
+
+// Direct callers (client-side physics objects, five at once) share the cap
 void FX_GunshotSplash( const Vector &origin, const Vector &normal, float scale )
+{
+	if ( cl_show_splashes.GetBool() && VitaSplashAllowed() )
+	{
+		FX_GunshotSplashInternal( origin, normal, scale, true );
+	}
+}
+
+static void FX_GunshotSplashInternal( const Vector &origin, const Vector &normal, float scale, bool bRipple )
+#else
+void FX_GunshotSplash( const Vector &origin, const Vector &normal, float scale )
+#endif
 {
 	VPROF_BUDGET( "FX_GunshotSplash", VPROF_BUDGETGROUP_PARTICLE_RENDERING );
 	
@@ -232,6 +304,9 @@ void FX_GunshotSplash( const Vector &origin, const Vector &normal, float scale )
 	}
 
 	// Do a ripple
+#ifdef PLATFORM_VITA
+	if ( bRipple )
+#endif
 	FX_WaterRipple( origin, flScale, &color, 1.5f, luminosity );
 
 	//Play a sound
@@ -255,7 +330,22 @@ void FX_GunshotSplash( const Vector &origin, const Vector &normal, float scale )
 //			scale - 
 //			*pColor - 
 //-----------------------------------------------------------------------------
+#ifdef PLATFORM_VITA
+static void FX_GunshotSlimeSplashInternal( const Vector &origin, const Vector &normal, float scale );
+
+// Same cap as water splashes
 void FX_GunshotSlimeSplash( const Vector &origin, const Vector &normal, float scale )
+{
+	if ( cl_show_splashes.GetBool() && VitaSplashAllowed() )
+	{
+		FX_GunshotSlimeSplashInternal( origin, normal, scale );
+	}
+}
+
+static void FX_GunshotSlimeSplashInternal( const Vector &origin, const Vector &normal, float scale )
+#else
+void FX_GunshotSlimeSplash( const Vector &origin, const Vector &normal, float scale )
+#endif
 {
 	if ( cl_show_splashes.GetBool() == false )
 		return;
@@ -418,6 +508,33 @@ void SplashCallback( const CEffectData &data )
 
 	AngleVectors( data.m_vAngles, &normal );
 
+#ifdef PLATFORM_VITA
+	if ( cl_show_splashes.GetBool() == false )
+		return;
+
+	if ( !VitaSplashAllowed() )
+	{
+		// Over the cap: keep the ripple FX_GunshotSplash would have drawn
+		// (one quad; slime splashes have none)
+		if ( !( data.m_fFlags & FX_WATER_IN_SLIME ) )
+		{
+			Vector	color;
+			float	luminosity;
+			FX_GetSplashLighting( data.m_vOrigin + Vector( 0, 0, data.m_flScale ), &color, &luminosity );
+			FX_WaterRipple( data.m_vOrigin, MIN( data.m_flScale / 8.0f, 4.0f ), &color, 1.5f, luminosity );
+		}
+		return;
+	}
+
+	if ( data.m_fFlags & FX_WATER_IN_SLIME )
+	{
+		FX_GunshotSlimeSplashInternal( data.m_vOrigin, Vector(0,0,1), data.m_flScale );
+	}
+	else
+	{
+		FX_GunshotSplashInternal( data.m_vOrigin, Vector(0,0,1), data.m_flScale, true );
+	}
+#else
 	if ( data.m_fFlags & FX_WATER_IN_SLIME )
 	{
 		FX_GunshotSlimeSplash( data.m_vOrigin, Vector(0,0,1), data.m_flScale );
@@ -426,6 +543,7 @@ void SplashCallback( const CEffectData &data )
 	{
 		FX_GunshotSplash( data.m_vOrigin, Vector(0,0,1), data.m_flScale );
 	}
+#endif
 }
 
 DECLARE_CLIENT_EFFECT( "watersplash", SplashCallback );
@@ -437,6 +555,21 @@ DECLARE_CLIENT_EFFECT( "watersplash", SplashCallback );
 //-----------------------------------------------------------------------------
 void GunshotSplashCallback( const CEffectData &data )
 {
+#ifdef PLATFORM_VITA
+	// Bullet splashes have their own throttle (VitaGunshotSplashAllowed) and
+	// draw no ripple; skipped ones draw nothing
+	if ( cl_show_splashes.GetBool() == false || !VitaGunshotSplashAllowed( data.m_vOrigin ) )
+		return;
+
+	if ( data.m_fFlags & FX_WATER_IN_SLIME )
+	{
+		FX_GunshotSlimeSplashInternal( data.m_vOrigin, Vector(0,0,1), data.m_flScale );
+	}
+	else
+	{
+		FX_GunshotSplashInternal( data.m_vOrigin, Vector(0,0,1), data.m_flScale, false );
+	}
+#else
 	if ( data.m_fFlags & FX_WATER_IN_SLIME )
 	{
 		FX_GunshotSlimeSplash( data.m_vOrigin, Vector(0,0,1), data.m_flScale );
@@ -445,6 +578,7 @@ void GunshotSplashCallback( const CEffectData &data )
 	{
 		FX_GunshotSplash( data.m_vOrigin, Vector(0,0,1), data.m_flScale );
 	}
+#endif
 }
 
 DECLARE_CLIENT_EFFECT( "gunshotsplash", GunshotSplashCallback );

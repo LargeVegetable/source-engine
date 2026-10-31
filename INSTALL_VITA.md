@@ -97,7 +97,7 @@ See VitaShell's own instructions for the buttons.
 
 ## Updating
 
-Install the new VPK over the old one. Your saves and settings stay.
+Install the new VPK over the old one. Your saves, settings and compiled shaders stay. A new version can need a few new shaders: they compile the first time they're drawn, or choose Prepare shaders > Prepare again in the main menu.
 
 ## Uninstalling
 

@@ -76,12 +76,13 @@ arm-vita-eabi-gcc $CFLAGS -c "$OUT/exports.S" -o "$OUT/exports.o"
 # --wrap: SDL's vitaGL init goes through the launcher, see main.cpp;
 # sem_destroy: pthread-embedded's sleeps 1 ms every time; malloc & co: large
 # blocks get their own arena, failures are logged; pthread_mutex_lock,
-# pthread_cond_timedwait, usleep: noted for hang reports; see so_loader.cpp
+# pthread_cond_timedwait, usleep, sceKernelWaitEventFlag: noted for hang
+# reports; see so_loader.cpp
 link_launcher() {
 	arm-vita-eabi-g++ $CFLAGS "$@" -Wl,-q -Wl,--no-enum-size-warning -Wl,--wrap=vglInitExtended -Wl,--wrap=sceClibPrintf -Wl,--wrap=vglSwapBuffers \
 		-Wl,--wrap=sem_destroy -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=memalign \
 		-Wl,--wrap=free -Wl,--wrap=malloc_usable_size -Wl,--wrap=mallinfo -Wl,--wrap=setvbuf \
-		-Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_cond_timedwait -Wl,--wrap=usleep \
+		-Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_cond_timedwait -Wl,--wrap=usleep -Wl,--wrap=sceKernelWaitEventFlag \
 		"$OUT/main.o" "$OUT/so_loader.o" "$OUT/vita_stubs.o" "$OUT/vita_iconv.o" "$OUT/exports.o" \
 		-o "$OUT/$NAME.elf" $VITAGL_LDFLAGS \
 		-Wl,--start-group \

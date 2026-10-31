@@ -430,6 +430,7 @@ extern "C" void __wrap_vglSwapBuffers( unsigned char has_commondialog )
 		SaveFrame( VITA_FILE_PREFIX "_shot", ++s_nShots );
 		glBindFramebuffer( GL_READ_FRAMEBUFFER_, prevRead );
 	}
+	so_vram_watch_swap();
 	s_nSwaps++;
 	const uint64_t nSwapStart = so_perf_now();
 	__real_vglSwapBuffers( has_commondialog );
@@ -661,7 +662,7 @@ static void WriteDefaultUserConfig( void )
 		"// Think interval for standing, idle NPCs (port default 0.2; 0.1 = PC)\n"
 		"// ai_vita_idle_think_interval 0.1\n"
 		"\n"
-		"// Texture detail: 3 = 1/8 size per axis (default), 4 = 1/16 (less\n"
+		"// Texture size: 3 = 1/8 size per axis (default), 4 = 1/16 (less\n"
 		"// memory, faster loads), 2 = 1/4 (sharpest; watch video memory)\n"
 		"// mat_picmip 4\n"
 		"\n"
@@ -675,6 +676,12 @@ static void WriteDefaultUserConfig( void )
 		"// mat_picmip_alphatest_min_size 128\n"
 		"// mat_picmip_viewmodel_min_size 128\n"
 		"\n"
+		"// Floors for world and character textures, set by Options > Video >\n"
+		"// Texture detail (Low: none; Medium: 128 and 256); a value above 0\n"
+		"// here overrides it (default 0 = from the menu)\n"
+		"// mat_picmip_world_min_size 256\n"
+		"// mat_picmip_character_min_size 512\n"
+		"\n"
 		"// Static props' baked vertex lighting (default 1; 0 lights them like\n"
 		"// physics props, which drew many black). Applies on map load\n"
 		"// r_vita_staticpropvertexlighting 0\n"
@@ -685,6 +692,19 @@ static void WriteDefaultUserConfig( void )
 		"// Model lighting: world lights per model on top of the ambient cube\n"
 		"// (default 0; 1-4 = less flat models, more CPU)\n"
 		"// r_worldlights 1\n"
+		"\n"
+		"// Model lighting eases between light levels as models move (default\n"
+		"// 1; 0 = steps, as in 0.1.2)\n"
+		"// r_lightaverage 0\n"
+		"\n"
+		"// Water: Valve's cheap water with reflections (default 1; 0 = the\n"
+		"// dark water of 0.1.2). Applies on map load\n"
+		"// r_vita_water_cheap 0\n"
+		"\n"
+		"// Water splashes (both default 1): the first line turns them all off,\n"
+		"// the second only the ones where bullets hit water\n"
+		"// cl_show_splashes 0\n"
+		"// r_vita_gunshot_splashes 0\n"
 		"\n"
 		"// Model detail: -1 picks by distance (default), 2 = low detail\n"
 		"// everywhere (cheaper with crowds)\n"

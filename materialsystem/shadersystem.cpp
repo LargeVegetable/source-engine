@@ -1969,6 +1969,13 @@ void CShaderSystem::LoadTexture( IMaterialVar *pTextureVar, const char *pTexture
 	}
 	else
 	{
+#ifdef PLATFORM_VITA
+		// Texture detail's world class (ctexture.cpp TEXTUREFLAGS_VITA_WORLD):
+		// the textures world materials load here ($basetexture, $basetexture2,
+		// masks), not their bump or cube maps (LoadBumpMap, LoadCubeMap)
+		if ( pTextureGroupName && !V_stricmp( pTextureGroupName, TEXTURE_GROUP_WORLD ) )
+			nAdditionalCreationFlags |= TEXTUREFLAGS_UNUSED_01000000;	// TEXTUREFLAGS_VITA_WORLD
+#endif
 		pTexture = static_cast< ITextureInternal * >( MaterialSystem()->FindTexture( pName, pTextureGroupName, false, nAdditionalCreationFlags ) );
 	}
 
