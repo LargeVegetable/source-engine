@@ -5635,7 +5635,7 @@ extern "C" size_t vglMemExternalInUse( void );		// launcher (vitaGL): its object
 // bump when the translated shader text changes (togles dx9asmtogl2.cpp,
 // vita_glsl conversion, vitaGL's cache key): old cache entries then miss and
 // "prepared" would be wrong
-#define VITA_PREPARE_STAMP	1
+#define VITA_PREPARE_STAMP	2	// 2: pixel shaders without the alpha test discard, and their alpha test variants
 #define VITA_PREPARE_BATCH	32
 
 typedef int ( *VitaShaderPrepareLoadedFn_t )( uint64_t nDeadline, int *pnCreated, int *pnFailed );
@@ -5672,6 +5672,7 @@ static struct
 	VitaShaderPrepareLoadedFn_t pfnPrepareLoaded;
 	VitaShaderVoidFn_t pfnPurgeUnused;
 	VitaShaderVoidFn_t pfnReset;
+	void ( *pfnAlphaTestVariants )( bool bNow );	// togl: compile each pixel shader's alpha test variant with it
 } s_VitaPrepare;
 
 static void VitaPrepareReadSaved( VitaPrepareSaved_t &saved )
@@ -5809,6 +5810,7 @@ static void VitaPrepareBegin( bool bResume )
 	s_VitaPrepare.pfnPrepareLoaded = (VitaShaderPrepareLoadedFn_t)dlsym( RTLD_DEFAULT, "VitaShaderPrepareLoaded" );
 	s_VitaPrepare.pfnPurgeUnused = (VitaShaderVoidFn_t)dlsym( RTLD_DEFAULT, "VitaShaderPurgeUnused" );
 	s_VitaPrepare.pfnReset = (VitaShaderVoidFn_t)dlsym( RTLD_DEFAULT, "VitaShaderPrepareReset" );
+	s_VitaPrepare.pfnAlphaTestVariants = ( void (*)( bool ) )dlsym( RTLD_DEFAULT, "ToGLVitaCompileAlphaTestVariants" );
 	if ( !s_VitaPrepare.pfnPrepareLoaded || !s_VitaPrepare.pfnPurgeUnused || !s_VitaPrepare.pfnReset )
 	{
 		so_trace( "prepare shaders: shaderapidx9's functions not found" );
@@ -5873,7 +5875,15 @@ static void VitaPrepareStep( unsigned nBudgetUs )
 	{
 		if ( s_VitaPrepare.bCompilePending )
 		{
-			if ( s_VitaPrepare.pfnPrepareLoaded( nDeadline, &status.nShadersCreated, &status.nShadersFailed ) )
+			// the shaders created now also put their alpha test variants
+			// into the shader cache (togl), so alpha-tested draws don't
+			// compile them in play
+			if ( s_VitaPrepare.pfnAlphaTestVariants )
+				s_VitaPrepare.pfnAlphaTestVariants( true );
+			const bool bMore = s_VitaPrepare.pfnPrepareLoaded( nDeadline, &status.nShadersCreated, &status.nShadersFailed ) != 0;
+			if ( s_VitaPrepare.pfnAlphaTestVariants )
+				s_VitaPrepare.pfnAlphaTestVariants( false );
+			if ( bMore )
 				return;
 			s_VitaPrepare.bCompilePending = false;
 		}

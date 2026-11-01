@@ -1402,7 +1402,13 @@ class GLMContext
 
 		// writers for the state block inputs
 		
+#ifdef PLATFORM_VITA
+		// alpha test on and off draw with different shader pairs (the discard
+		// variant), so a change selects the pair again
+		FORCEINLINE void	WriteAlphaTestEnable( GLAlphaTestEnable_t *src ) { if ( !src->enable != !m_AlphaTestEnable.GetData().enable ) m_bDirtyPrograms = true; m_AlphaTestEnable.Write( src ); }
+#else
 		FORCEINLINE void	WriteAlphaTestEnable( GLAlphaTestEnable_t *src ) { m_AlphaTestEnable.Write( src ); }
+#endif
 		FORCEINLINE void	WriteAlphaTestFunc( GLAlphaTestFunc_t *src ) { m_AlphaTestFunc.Write( src ); }
 		FORCEINLINE void	WriteAlphaToCoverageEnable( GLAlphaToCoverageEnable_t *src ) { m_AlphaToCoverageEnable.Write( src ); }
 		FORCEINLINE void	WriteCullFaceEnable( GLCullFaceEnable_t *src ) { m_CullFaceEnable.Write( src ); }

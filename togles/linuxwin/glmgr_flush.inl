@@ -182,7 +182,14 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 	{
 		m_bDirtyPrograms = false;
 
-		CGLMShaderPair *pNewPair = m_pairCache->SelectShaderPair( m_drawingProgram[ kGLMVertexProgram ], m_drawingProgram[ kGLMFragmentProgram ], 0 );
+#ifdef PLATFORM_VITA
+		// extra key bit 0: alpha test on, so the pair with the pixel shader's
+		// discard variant (CGLMShaderPair::SetProgramPair)
+		const uint nExtraKeyBits = m_AlphaTestEnable.GetData().enable ? 1 : 0;
+#else
+		const uint nExtraKeyBits = 0;
+#endif
+		CGLMShaderPair *pNewPair = m_pairCache->SelectShaderPair( m_drawingProgram[ kGLMVertexProgram ], m_drawingProgram[ kGLMFragmentProgram ], nExtraKeyBits );
 
 		if ( pNewPair != m_pBoundPair )
 		{
