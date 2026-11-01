@@ -1040,6 +1040,11 @@ public:
 		ndelta[2] = flNDelta[2].GetFloat() / flVertAnimFixedPointScale;
 	}
 
+	// delta[3] then ndelta[3], fixed point (studiorender's NEON flex path)
+	inline const short *GetDeltasFixed() const
+	{
+		return delta;
+	}
 	inline Vector GetDeltaFixed( float flVertAnimFixedPointScale )
 	{
 		return Vector( delta[0] * flVertAnimFixedPointScale, delta[1] * flVertAnimFixedPointScale, delta[2] * flVertAnimFixedPointScale );

@@ -151,6 +151,7 @@ private:
 	// Flex data, allocated for the lifespan of rendering
 	// Can't use UtlVector due to alignment issues
 	int					m_FlexVertexCount;
+	int					m_FlexVertexMeshStart;	// the first flexed vertex of the mesh being flexed
 	CachedPosNormTan_t	m_pFlexVerts[MAXSTUDIOFLEXVERTS+1];
 
 	// Flex data, allocated for the lifespan of rendering

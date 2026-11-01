@@ -22,6 +22,7 @@
 #include "tier1/convar.h"
 #include "tier1/KeyValues.h"
 #include "tier0/vprof.h"
+#include "flexneon.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -291,6 +292,26 @@ void CStudioRender::R_StudioFlexVerts( mstudiomesh_t *pmesh, int lod )
 			mstudiovertanim_t *pAnim = (mstudiovertanim_t*)( pvanim + j * nVAnimSizeBytes );
 			n = pAnim->index;
 
+#ifdef STUDIO_FLEX_NEON
+			// The flexed vertices are scattered over up to ~480 KB, so the
+			// loop waits on memory more than it computes: fetch the vertex
+			// index entry eight records ahead, and the flexed vertex four
+			// ahead (once its entry is in cache)
+			if ( j + 8 < pflex[i].numverts )
+			{
+				const mstudiovertanim_t *pAhead = (const mstudiovertanim_t *)( pvanim + ( j + 8 ) * nVAnimSizeBytes );
+				if ( m_VertexCache.m_pFirstFlexIndex )
+					__builtin_prefetch( &m_VertexCache.m_pFirstFlexIndex[pAhead->index] );
+				pAhead = (const mstudiovertanim_t *)( pvanim + ( j + 4 ) * nVAnimSizeBytes );
+				if ( m_VertexCache.IsVertexFlexed( pAhead->index ) )
+				{
+					const char *pSlot = (const char *)m_VertexCache.GetFlexVertex( pAhead->index );
+					__builtin_prefetch( pSlot, 1 );
+					__builtin_prefetch( pSlot + sizeof( CachedPosNormTan_t ) - 1, 1 );
+				}
+			}
+#endif
+
 			// Only flex the indices that are (still) part of this mesh
 			// need lod restriction here
 			if (n < pmesh->vertexdata.numLODVertexes[lod])
@@ -325,6 +346,13 @@ void CStudioRender::R_StudioFlexVerts( mstudiomesh_t *pmesh, int lod )
 
 				float w = (w1 * s + (1.0f - s) * w2) * (1.0f - b) + b * (w3 * s + (1.0f - s) * w4);
 
+#ifdef STUDIO_FLEX_NEON
+				// Accumulate weighted deltas: one convert and multiply-add per
+				// four components (most of the render thread's time in scenes
+				// with talking faces went to the scalar version below)
+				FlexAccumulateNeon( pFlexedVertex->m_Position.Base(), pStudioTangentS ? pFlexedVertex->m_TangentS.Base() : NULL,
+					pAnim->GetDeltasFixed(), w * flVertAnimFixedPointScale );
+#else
 				// Accumulate weighted deltas
 				pFlexedVertex->m_Position += pAnim->GetDeltaFixed( flVertAnimFixedPointScale ) * w;
 				pFlexedVertex->m_Normal += pAnim->GetNDeltaFixed( flVertAnimFixedPointScale ) * w;
@@ -334,6 +362,7 @@ void CStudioRender::R_StudioFlexVerts( mstudiomesh_t *pmesh, int lod )
 					pFlexedVertex->m_TangentS.AsVector3D() += pAnim->GetNDeltaFixed( flVertAnimFixedPointScale ) * w;
 					Assert( pFlexedVertex->m_TangentS.w == -1.0f || pFlexedVertex->m_TangentS.w == 1.0f );
 				}
+#endif
 			}
 		}
 	}

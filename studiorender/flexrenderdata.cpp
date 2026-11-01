@@ -6,6 +6,7 @@
 //=============================================================================//
 
 #include "flexrenderdata.h"
+#include "flexneon.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -53,6 +54,7 @@ void CCachedRenderData::StartModel()
 	++m_CurrentTag;
 	m_IndexCount = 0;
 	m_FlexVertexCount = 0;
+	m_FlexVertexMeshStart = 0;
 	m_ThinFlexVertexCount = 0;
 	m_WorldVertexCount = 0;
 	m_pFirstFlexIndex = 0;
@@ -145,7 +147,10 @@ void CCachedRenderData::SetupComputation( mstudiomesh_t *pMesh, bool flexComputa
 	}
 
 	if (flexComputation)
+	{
 		dict.m_FlexTag = m_CurrentTag;
+		m_FlexVertexMeshStart = m_FlexVertexCount;
+	}
 
 	m_pFirstFlexIndex = &m_pFlexIndex[dict.m_FirstIndex];
 	m_pFirstThinFlexIndex = &m_pThinFlexIndex[dict.m_FirstIndex];
@@ -201,12 +206,24 @@ CachedPosNorm_t* CCachedRenderData::CreateThinFlexVertex( int vertex )
 //-----------------------------------------------------------------------------
 // Re-normalize the surface normals and tangents of the flexed vertices
 // No thin ones since they're intended to be deltas, not unit vectors
+// Only the current mesh's: the count runs over the whole model, so going
+// from 0 renormalized the earlier meshes' vertices again for every later
+// flexed mesh (a face with several flexed meshes did it several times)
 //-----------------------------------------------------------------------------
 void CCachedRenderData::RenormalizeFlexVertices( bool bHasTangentData )
 {
 	int i;
 
-	for (i = 0; i < m_FlexVertexCount; i++)
+#ifdef STUDIO_FLEX_NEON
+	// The normal and the tangent in one pass, no sqrt or divide (the 16-byte
+	// read at the normal ends inside the tangent)
+	COMPILE_TIME_ASSERT( offsetof( CachedPosNormTan_t, m_Normal ) == 12 && offsetof( CachedPosNormTan_t, m_TangentS ) >= 24 );
+	for (i = m_FlexVertexMeshStart; i < m_FlexVertexCount; i++)
+	{
+		FlexRenormalizeNeon( m_pFlexVerts[ i ].m_Normal.Base(), bHasTangentData ? m_pFlexVerts[ i ].m_TangentS.Base() : NULL );
+	}
+#else
+	for (i = m_FlexVertexMeshStart; i < m_FlexVertexCount; i++)
 	{
 		m_pFlexVerts[ i ].m_Normal.NormalizeInPlace();
 		if (bHasTangentData)
@@ -214,6 +231,7 @@ void CCachedRenderData::RenormalizeFlexVertices( bool bHasTangentData )
 			m_pFlexVerts[ i ].m_TangentS.AsVector3D().NormalizeInPlace();
 		}
 	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
