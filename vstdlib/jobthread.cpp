@@ -463,11 +463,24 @@ private:
 	int Run()
 	{
 #ifdef PLATFORM_VITA
-		// Main job pool workers on cores 1 and 2 (the engine thread is on
-		// core 0); left unpinned, Vita threads don't spread across cores
+		// Main job pool workers on core 1 (the engine thread is on core 0,
+		// the material system's render thread on core 2); left unpinned,
+		// Vita threads don't spread across cores. Worker 1 used to be on
+		// core 2, but equal priorities aren't time-sliced on the Vita: it
+		// only ran when the render thread (80-90% busy) blocked, so the
+		// client's parallel jobs (bone setup, leaf system, renderables,
+		// particles) ended up on the engine thread anyway (worker 1 at 0%)
 		if ( (IThreadPool *)m_pOwner == g_pThreadPool )
 		{
-			sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 << ( m_iThread % 2 ) );
+			sceKernelChangeThreadCpuAffinityMask( sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 );
+			// Worker 1 one step above the rest of core 1: worker 0 runs the
+			// server frame (~8 ms) and, at equal priority, worker 1 could
+			// only start the client's parallel jobs (bone setup, leaf
+			// system, renderables) once it ended, by when the engine thread
+			// had done them all itself. The server job isn't waited for
+			// until the end of the engine's frame
+			if ( m_iThread == 1 )
+				sceKernelChangeThreadPriority( sceKernelGetThreadId(), sceKernelGetThreadCurrentPriority() - 1 );
 			so_thread_register( m_iThread == 0 ? "worker 0 (server)" : m_iThread == 1 ? "worker 1" : "worker" );
 		}
 		else if ( !strncmp( GetName(), "IOJob", 5 ) )
