@@ -119,6 +119,27 @@ private:
 	int									m_nNextDLLIdentifier;
 	ConCommandBase						*m_pConCommandList;
 
+	// Name index over m_pConCommandList: FindCommandBase walked the whole
+	// list (a few thousand commands) with a case-insensitive compare per
+	// entry, 1-2% of the Vita's engine thread from per-frame lookups. Open
+	// addressing, case-insensitive hash; a name maps to the first command
+	// with that name in list order, as the walk found. Tables are replaced,
+	// never resized in place, so a lookup from another thread keeps a whole
+	// table; the replaced one is kept until the next replacement frees it
+	// (a lookup would have to outlast two rebuilds to see freed memory), so
+	// at most two tables exist, ~64 KB each for ~3000 commands
+	struct CommandIndex_t
+	{
+		int m_nMask;	// size - 1, a power of two
+		int m_nCount;
+		ConCommandBase *m_pEntries[1];
+	};
+	CommandIndex_t * volatile			m_pCommandIndex;
+	CommandIndex_t *					m_pRetiredCommandIndex;	// the table before, freed at the next rebuild
+	static unsigned int					HashCommandName( const char *pName );
+	void								IndexAdd( ConCommandBase *pCommand );
+	void								IndexRebuild();
+
 	// temporary console area so we can store prints before console display funs are installed
 	mutable CUtlBuffer					m_TempConsoleBuffer;
 protected:
@@ -223,6 +244,8 @@ CCvar::CCvar() : m_TempConsoleBuffer( 0, 1024 )
 {
 	m_nNextDLLIdentifier = 0;
 	m_pConCommandList = NULL;
+	m_pCommandIndex = NULL;
+	m_pRetiredCommandIndex = NULL;
 
 	m_bMaterialSystemThreadSetAllowed = false;
 }
@@ -405,6 +428,7 @@ void CCvar::RegisterConCommand( ConCommandBase *variable )
 	// link the variable in
 	variable->m_pNext = m_pConCommandList;
 	m_pConCommandList = variable;
+	IndexAdd( variable );
 }
 
 void CCvar::UnregisterConCommand( ConCommandBase *pCommandToRemove )
@@ -434,6 +458,7 @@ void CCvar::UnregisterConCommand( ConCommandBase *pCommandToRemove )
 			pPrev->m_pNext = pCommand->m_pNext;
 		}
 		pCommand->m_pNext = NULL;
+		IndexRebuild();
 		break;
 	}
 }
@@ -471,6 +496,7 @@ void CCvar::UnregisterConCommands( CVarDLLIdentifier_t id )
 	}
 
 	m_pConCommandList = pNewList;
+	IndexRebuild();
 }
 #ifdef WIN32
 #pragma optimize( "", on )
@@ -480,8 +506,108 @@ void CCvar::UnregisterConCommands( CVarDLLIdentifier_t id )
 //-----------------------------------------------------------------------------
 // Finds base commands 
 //-----------------------------------------------------------------------------
+unsigned int CCvar::HashCommandName( const char *pName )
+{
+	// FNV-1a over the lowercased name
+	unsigned int nHash = 2166136261u;
+	for ( ; *pName; pName++ )
+	{
+		unsigned char c = *pName;
+		if ( c >= 'A' && c <= 'Z' )
+			c += 'a' - 'A';
+		nHash = ( nHash ^ c ) * 16777619u;
+	}
+	return nHash;
+}
+
+// Adds a command just linked in at the list's head: it shadows any older
+// command of the same name, as the list walk found the newest first
+void CCvar::IndexAdd( ConCommandBase *pCommand )
+{
+	CommandIndex_t *pIndex = m_pCommandIndex;
+	if ( !pIndex || ( pIndex->m_nCount + 1 ) * 2 > pIndex->m_nMask + 1 )
+	{
+		IndexRebuild();
+		return;
+	}
+	const char *pName = pCommand->GetName();
+	for ( unsigned int i = HashCommandName( pName ); ; i++ )
+	{
+		ConCommandBase *&pEntry = pIndex->m_pEntries[i & pIndex->m_nMask];
+		if ( !pEntry )
+		{
+			pIndex->m_nCount++;
+			pEntry = pCommand;
+			return;
+		}
+		if ( !Q_stricmp( pName, pEntry->GetName() ) )
+		{
+			pEntry = pCommand;
+			return;
+		}
+	}
+}
+
+// A new table from the list: sized for twice the commands, each name to its
+// first command in list order
+void CCvar::IndexRebuild()
+{
+	int nCommands = 0;
+	for ( const ConCommandBase *pCommand = m_pConCommandList; pCommand; pCommand = pCommand->GetNext() )
+		nCommands++;
+	int nSize = 256;
+	while ( nSize < nCommands * 4 )
+		nSize *= 2;
+	// the table replaced last time goes now; the current one is retired
+	free( m_pRetiredCommandIndex );
+	m_pRetiredCommandIndex = m_pCommandIndex;
+	CommandIndex_t *pIndex = (CommandIndex_t *)calloc( 1, sizeof( CommandIndex_t ) + ( nSize - 1 ) * sizeof( ConCommandBase * ) );
+	if ( !pIndex )
+	{
+		m_pCommandIndex = NULL;	// the list walk below stays correct
+		return;
+	}
+	pIndex->m_nMask = nSize - 1;
+	for ( ConCommandBase *pCommand = m_pConCommandList; pCommand; pCommand = pCommand->m_pNext )
+	{
+		const char *pName = pCommand->GetName();
+		for ( unsigned int i = HashCommandName( pName ); ; i++ )
+		{
+			ConCommandBase *&pEntry = pIndex->m_pEntries[i & pIndex->m_nMask];
+			if ( !pEntry )
+			{
+				pEntry = pCommand;
+				pIndex->m_nCount++;
+				break;
+			}
+			if ( !Q_stricmp( pName, pEntry->GetName() ) )
+				break;	// an older command of the same name: stays shadowed
+		}
+	}
+	// the entries before the pointer, for other threads (a compiler barrier
+	// isn't enough on ARM)
+#ifdef COMPILER_GCC
+	__sync_synchronize();
+#else
+	ThreadMemoryBarrier();
+#endif
+	m_pCommandIndex = pIndex;
+}
+
 const ConCommandBase *CCvar::FindCommandBase( const char *name ) const
 {
+	const CommandIndex_t *pIndex = m_pCommandIndex;
+	if ( pIndex )
+	{
+		for ( unsigned int i = HashCommandName( name ); ; i++ )
+		{
+			const ConCommandBase *pEntry = pIndex->m_pEntries[i & pIndex->m_nMask];
+			if ( !pEntry )
+				return NULL;
+			if ( !Q_stricmp( name, pEntry->GetName() ) )
+				return pEntry;
+		}
+	}
 	const ConCommandBase *cmd = GetCommands();
 	for ( ; cmd; cmd = cmd->GetNext() )
 	{
@@ -493,13 +619,7 @@ const ConCommandBase *CCvar::FindCommandBase( const char *name ) const
 
 ConCommandBase *CCvar::FindCommandBase( const char *name )
 {
-	ConCommandBase *cmd = GetCommands();
-	for ( ; cmd; cmd = cmd->GetNext() )
-	{
-		if ( !Q_stricmp( name, cmd->GetName() ) )
-			return cmd;
-	}
-	return NULL;
+	return const_cast<ConCommandBase *>( static_cast<const CCvar *>( this )->FindCommandBase( name ) );
 }
 
 
