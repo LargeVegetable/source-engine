@@ -645,6 +645,11 @@ void C_ClientRagdoll::Release( void )
 // was last time they setup their bones to determine if they need to re-setup their bones.
 static unsigned long	g_iModelBoneCounter = 0;
 CUtlVector<C_BaseAnimating *> g_PreviousBoneSetups;
+// SetupBones runs on the job pool's threads too (threaded renderables and
+// leaf system, cl_threaded_* on the Vita), so adding to the list is locked;
+// a racing AddToTail left empty or stale entries that the next frame's
+// threaded bone setup called through
+static CThreadFastMutex g_PreviousBoneSetupsLock;
 static unsigned long	g_iPreviousBoneCounter = (unsigned)-1;
 
 class C_BaseAnimatingGameSystem : public CAutoGameSystem
@@ -747,9 +752,12 @@ C_BaseAnimating::C_BaseAnimating() :
 //-----------------------------------------------------------------------------
 C_BaseAnimating::~C_BaseAnimating()
 {
-	int i = g_PreviousBoneSetups.Find( this );
-	if ( i != -1 )
-		g_PreviousBoneSetups.FastRemove( i );
+	{
+		AUTO_LOCK( g_PreviousBoneSetupsLock );
+		int i = g_PreviousBoneSetups.Find( this );
+		if ( i != -1 )
+			g_PreviousBoneSetups.FastRemove( i );
+	}
 	RemoveFromClientSideAnimationList();
 
 	TermRopes();
@@ -2805,6 +2813,7 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 	if ( g_bDoThreadedBoneSetup && !g_bInThreadedBoneSetup && ( nBoneCount >= 16 ) && !GetMoveParent() && m_iMostRecentBoneSetupRequest != g_iPreviousBoneCounter )
 	{
 		m_iMostRecentBoneSetupRequest = g_iPreviousBoneCounter;
+		AUTO_LOCK( g_PreviousBoneSetupsLock );
 		Assert( g_PreviousBoneSetups.Find( this ) == -1 );
 		g_PreviousBoneSetups.AddToTail( this );
 	}
