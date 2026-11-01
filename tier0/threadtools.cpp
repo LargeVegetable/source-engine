@@ -512,6 +512,13 @@ ThreadId_t ThreadGetCurrentId()
 	sys_ppu_thread_t th = 0;
 	sys_ppu_thread_get_id( &th );
 	return th;
+#elif defined( PLATFORM_VITA )
+	// The kernel's thread UID: pthread-embedded's pthread_self looks itself
+	// up in its thread-local list on every call, and this runs on every
+	// CThreadFastMutex lock and unlock and every ThreadInMainThread. IDs are
+	// only compared with other ThreadGetCurrentId values (lock owners, the
+	// main and render thread IDs), never used as pthread handles
+	return (ThreadId_t)sceKernelGetThreadId();
 #elif defined(POSIX)
 	return (ThreadId_t)pthread_self();
 #else
@@ -1830,6 +1837,169 @@ bool CThreadFullMutex::Release()
 namespace GenericThreadLocals
 {
 #endif
+
+#ifdef PLATFORM_VITA
+// Thread locals on the Vita. pthread-embedded keeps each thread's values in
+// a linked list that every pthread_getspecific searches from the start
+// (platform/vita/vita_osal.c), and the engine has dozens of thread locals
+// (data cache sections, material system contexts, ...): the lookups were
+// 3-4% of the engine, render and server threads' time (vdb profile, the
+// list walk in pte_osTlsGetValue). Instead, one pthread key per thread holds
+// an array of values; each thread local owns a slot in it. The slot number
+// is tagged with a generation (m_index = generation << 12 | slot), so a slot
+// handed out again after its thread local was destroyed reads as unset in
+// threads that still hold the old value
+namespace
+{
+	struct VitaTlsEntry_t
+	{
+		uint32 nTag;
+		void *pValue;
+	};
+	struct VitaTlsArray_t
+	{
+		int nSlots;
+		VitaTlsEntry_t entries[1];
+	};
+	const int VITA_TLS_SLOT_BITS = 12;
+	const uint32 VITA_TLS_SLOT_MASK = ( 1u << VITA_TLS_SLOT_BITS ) - 1;
+	pthread_mutex_t s_VitaTlsLock = PTHREAD_MUTEX_INITIALIZER;
+	pthread_key_t s_VitaTlsKey;
+	bool s_bVitaTlsKey;
+	int s_nVitaTlsSlotsUsed;
+	uint32 s_nVitaTlsGeneration;
+	unsigned short s_VitaTlsFreeSlots[VITA_TLS_SLOT_MASK + 1];
+	int s_nVitaTlsFreeSlots;
+
+	// pthread_getspecific still walks the thread's list to our key (SDL,
+	// libstdc++ and pthread-embedded keys come first on the engine thread),
+	// so the array is also cached by kernel thread UID: direct-mapped, each
+	// entry the UID and the array pointer in one 64-bit word read and
+	// written atomically (a colliding thread's entry is never mistaken for
+	// ours). A miss falls back to pthread_getspecific. A thread started with
+	// sceKernelCreateThread instead of pthread gets no key destructor, so
+	// its entry outlives it; a later thread would only inherit it with the
+	// same UID, and the kernel hands UIDs out in increasing order (measured:
+	// threads created one after another got ...109, ...111, ...119)
+	const int VITA_TLS_CACHE = 64;
+	uint64 s_VitaTlsCache[VITA_TLS_CACHE];
+
+	inline uint64 *VitaTlsCacheEntry( SceUID nThread )
+	{
+		return &s_VitaTlsCache[( (uint32)nThread * 2654435761u ) >> 26];
+	}
+
+	VitaTlsArray_t *VitaTlsGetArray()
+	{
+		const SceUID nThread = sceKernelGetThreadId();
+		const uint64 nEntry = __atomic_load_n( VitaTlsCacheEntry( nThread ), __ATOMIC_ACQUIRE );
+		if ( (uint32)nEntry == (uint32)nThread )
+			return (VitaTlsArray_t *)(uintp)( nEntry >> 32 );
+		VitaTlsArray_t *pArray = (VitaTlsArray_t *)pthread_getspecific( s_VitaTlsKey );
+		if ( pArray )
+			__atomic_store_n( VitaTlsCacheEntry( nThread ), ( (uint64)(uintp)pArray << 32 ) | (uint32)nThread, __ATOMIC_RELEASE );
+		return pArray;
+	}
+
+	void VitaTlsSetArray( VitaTlsArray_t *pArray )
+	{
+		const SceUID nThread = sceKernelGetThreadId();
+		if ( pthread_setspecific( s_VitaTlsKey, pArray ) != 0 )
+			AssertMsg( 0, "Bad thread local" );
+		__atomic_store_n( VitaTlsCacheEntry( nThread ), ( (uint64)(uintp)pArray << 32 ) | (uint32)nThread, __ATOMIC_RELEASE );
+	}
+
+	// pthread key destructor (threads started through pthread): the array
+	// goes, and so does the cache entry, before the UID can be reused
+	void VitaTlsFreeArray( void *pArray )
+	{
+		const SceUID nThread = sceKernelGetThreadId();
+		uint64 *pEntry = VitaTlsCacheEntry( nThread );
+		uint64 nEntry = __atomic_load_n( pEntry, __ATOMIC_ACQUIRE );
+		if ( (uint32)nEntry == (uint32)nThread )
+			__atomic_compare_exchange_n( pEntry, &nEntry, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED );
+		free( pArray );
+	}
+}
+
+static uint32 VitaTlsIndex( pthread_key_t key )
+{
+	return (uint32)(uintp)key;
+}
+
+CThreadLocalBase::CThreadLocalBase()
+{
+	pthread_mutex_lock( &s_VitaTlsLock );
+	if ( !s_bVitaTlsKey )
+	{
+		if ( pthread_key_create( &s_VitaTlsKey, VitaTlsFreeArray ) != 0 )
+			Error( "Out of thread local storage!\n" );
+		s_bVitaTlsKey = true;
+	}
+	uint32 nSlot;
+	if ( s_nVitaTlsFreeSlots )
+		nSlot = s_VitaTlsFreeSlots[--s_nVitaTlsFreeSlots];
+	else if ( s_nVitaTlsSlotsUsed <= (int)VITA_TLS_SLOT_MASK )
+		nSlot = s_nVitaTlsSlotsUsed++;
+	else
+		Error( "Out of thread local storage!\n" );
+	// generation 0 is skipped so no tag is 0 (an empty entry)
+	if ( ( ++s_nVitaTlsGeneration & ( 0xffffffffu >> VITA_TLS_SLOT_BITS ) ) == 0 )
+		++s_nVitaTlsGeneration;
+	m_index = (pthread_key_t)(uintp)( ( s_nVitaTlsGeneration << VITA_TLS_SLOT_BITS ) | nSlot );
+	pthread_mutex_unlock( &s_VitaTlsLock );
+}
+
+CThreadLocalBase::~CThreadLocalBase()
+{
+	pthread_mutex_lock( &s_VitaTlsLock );
+	s_VitaTlsFreeSlots[s_nVitaTlsFreeSlots++] = VitaTlsIndex( m_index ) & VITA_TLS_SLOT_MASK;
+	pthread_mutex_unlock( &s_VitaTlsLock );
+	m_index = 0;
+}
+
+void * CThreadLocalBase::Get() const
+{
+	const uint32 nTag = VitaTlsIndex( m_index );
+	const int nSlot = nTag & VITA_TLS_SLOT_MASK;
+	const VitaTlsArray_t *pArray = VitaTlsGetArray();
+	if ( !pArray || nSlot >= pArray->nSlots || pArray->entries[nSlot].nTag != nTag )
+		return NULL;
+	return pArray->entries[nSlot].pValue;
+}
+
+void CThreadLocalBase::Set( void *value )
+{
+	const uint32 nTag = VitaTlsIndex( m_index );
+	if ( !nTag )
+	{
+		// destroyed (or not constructed yet): tag 0 would land on slot 0,
+		// which belongs to a live thread local
+		AssertMsg( 0, "Bad thread local" );
+		return;
+	}
+	const int nSlot = nTag & VITA_TLS_SLOT_MASK;
+	VitaTlsArray_t *pArray = VitaTlsGetArray();
+	if ( !pArray || nSlot >= pArray->nSlots )
+	{
+		// this thread's first value, or a slot past its array: grow it
+		int nOld = pArray ? pArray->nSlots : 0;
+		int nNew = MAX( nSlot + 1, MAX( 64, nOld * 2 ) );
+		VitaTlsArray_t *pNew = (VitaTlsArray_t *)realloc( pArray, sizeof( VitaTlsArray_t ) + ( nNew - 1 ) * sizeof( VitaTlsEntry_t ) );
+		if ( !pNew )
+		{
+			AssertMsg( 0, "Bad thread local" );
+			return;
+		}
+		memset( &pNew->entries[nOld], 0, ( nNew - nOld ) * sizeof( VitaTlsEntry_t ) );
+		pNew->nSlots = nNew;
+		pArray = pNew;
+		VitaTlsSetArray( pArray );
+	}
+	pArray->entries[nSlot].nTag = nTag;
+	pArray->entries[nSlot].pValue = value;
+}
+#else
 CThreadLocalBase::CThreadLocalBase()
 {
 #if defined(_WIN32) || defined(_PS3)
@@ -1885,6 +2055,7 @@ void CThreadLocalBase::Set( void *value )
 		AssertMsg( 0, "Bad thread local" );
 #endif
 }
+#endif // PLATFORM_VITA
 #if !defined(_PS3)
 } // namespace GenericThreadLocals
 #endif

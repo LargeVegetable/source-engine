@@ -365,9 +365,15 @@ INLINE_ON_PS3 bool CThread::SetPriority(int priority)
 // Suspend a thread
 INLINE_ON_PS3 unsigned CThread::Suspend()
 {
-	AssertMsg( ThreadGetCurrentId() == (ThreadId_t)m_threadId, "Cannot call CThread::Suspend from outside thread" );
+#ifdef PLATFORM_VITA
+	// ThreadGetCurrentId is the kernel thread UID on the Vita, m_threadId a pthread_t
+	const bool bOnThisThread = pthread_equal( pthread_self(), m_threadId ) != 0;
+#else
+	const bool bOnThisThread = ( ThreadGetCurrentId() == (ThreadId_t)m_threadId );
+#endif
+	AssertMsg( bOnThisThread, "Cannot call CThread::Suspend from outside thread" );
 
-	if ( ThreadGetCurrentId() != (ThreadId_t)m_threadId )
+	if ( !bOnThisThread )
 	{
 		DebuggerBreakIfDebugging();
 	}
