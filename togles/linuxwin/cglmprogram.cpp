@@ -35,6 +35,7 @@
 #include "tier0/fasttimer.h"
 #ifdef PLATFORM_VITA
 #include "vita_glsl.h"
+#include "tier1/lzss.h"
 #endif
 
 #if GLMDEBUG && defined( _MSC_VER )
@@ -51,6 +52,25 @@
 #endif
 
 //===============================================================================
+
+#ifdef PLATFORM_VITA
+// PREPARE SHADERS (materialsystem, through ToGLVitaCompileAlphaTestVariants)
+// compiles each pixel shader's alpha test variant as soon as the shader
+// itself, which puts it into vitaGL's shader cache; the variant's shader
+// object is deleted right away (the run's memory stays as it was), and a
+// later alpha-tested draw only loads it from the cache
+static bool s_bVitaCompileAlphaTestNow;
+
+// SceShaccCg at vitaGL's default -O3 with fastmath hits "fatal internal
+// error" on some pixel shaders once their alpha test discard is gone (e.g.
+// a lightmappedgeneric_ps20b combo with envmap and fog), and after that
+// every compile in the process fails. The same shaders compile at -O2, so
+// pixel shaders without the discard are compiled at -O2 and vitaGL's
+// defaults are put back after
+extern "C" void vglSetupRuntimeShaderCompiler( int opt_level, int32_t use_fastmath, int32_t use_fastprecision, int32_t use_fastint );
+#define VITA_SHARK_OPT_DEFAULT	2	// shark_opt: -O2
+#define VITA_SHARK_OPT_FAST		3	// -O3, vitaGL's default
+#endif
 
 ConVar	gl_shaderpair_cacherows_lg2( "gl_paircache_rows_lg2", "10");		// 10 is minimum
 ConVar	gl_shaderpair_cacheways_lg2( "gl_paircache_ways_lg2", "5");		// 5 is minimum
@@ -140,6 +160,10 @@ CGLMProgram::CGLMProgram( GLMContext *ctx, EGLMProgramType type )
 	m_shaderName[0] = '\0';
 
 	m_bTranslatedProgram = false;
+#ifdef PLATFORM_VITA
+	m_vitaAlphaTestShader = 0;
+	m_pVitaAlphaTestSource = NULL;
+#endif
 
 	m_nCentroidMask = 0;
 	m_nShadowDepthSamplerMask = 0;
@@ -162,6 +186,15 @@ CGLMProgram::~CGLMProgram( )
 		gGL->glDeleteShader( (uint)glslDesc->m_object.glsl );	// why do I need a cast here again ?
 		glslDesc->m_object.glsl = 0;
 	}
+#ifdef PLATFORM_VITA
+	if ( m_vitaAlphaTestShader )
+	{
+		gGL->glDeleteShader( m_vitaAlphaTestShader );
+		m_vitaAlphaTestShader = 0;
+	}
+	free( m_pVitaAlphaTestSource );
+	m_pVitaAlphaTestSource = NULL;
+#endif
 
 #if GLMDEBUG
 	if (m_editable)
@@ -373,6 +406,52 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 			// vitaGL only translates GLSL ES 1.00
 			std::string vitaSource;
 			VitaConvertGLSL( section, glslDesc->m_textLength, glslStage == GL_FRAGMENT_SHADER, vitaSource );
+
+			// The alpha test variant: the same text with the discard where
+			// the translator left its marker, converted now (the text may be
+			// freed below) and compiled on its first use (VitaAlphaTestShader)
+			if ( m_vitaAlphaTestShader )
+			{
+				gGL->glDeleteShader( m_vitaAlphaTestShader );
+				m_vitaAlphaTestShader = 0;
+			}
+			free( m_pVitaAlphaTestSource );
+			m_pVitaAlphaTestSource = NULL;
+			bool bVitaNoDiscard = false;
+			if ( glslStage == GL_FRAGMENT_SHADER )
+			{
+				std::string alphaTestText( section, glslDesc->m_textLength );
+				const size_t nMarker = alphaTestText.find( GLM_VITA_ALPHATEST_MARKER );
+				if ( nMarker != std::string::npos )
+				{
+					bVitaNoDiscard = true;
+					alphaTestText.replace( nMarker, sizeof( GLM_VITA_ALPHATEST_MARKER ) - 1, GLM_VITA_ALPHATEST_DISCARD );
+					std::string alphaTestSource;
+					VitaConvertGLSL( alphaTestText.c_str(), (int)alphaTestText.size(), true, alphaTestSource );
+					// kept compressed: most pixel shaders are never drawn with
+					// alpha test, and hundreds can be alive (the source is
+					// text, LZSS halves it or better)
+					unsigned int nCompressed = 0;
+					unsigned char *pCompressed = CLZSS().Compress( (const unsigned char *)alphaTestSource.c_str(), (int)alphaTestSource.size() + 1, &nCompressed );
+					if ( pCompressed )
+					{
+						// shrunk to the compressed size (kept as it is if that fails)
+						char *pShrunk = (char *)realloc( pCompressed, nCompressed );
+						m_pVitaAlphaTestSource = pShrunk ? pShrunk : (char *)pCompressed;
+					}
+					else
+						m_pVitaAlphaTestSource = strdup( alphaTestSource.c_str() );
+
+					// PREPARE SHADERS: into the shader cache now, the object
+					// deleted at once (ToGLVitaCompileAlphaTestVariants)
+					if ( s_bVitaCompileAlphaTestNow && m_pVitaAlphaTestSource )
+					{
+						const GLuint warmed = VitaCompileAlphaTestSource( NULL );
+						if ( warmed )
+							gGL->glDeleteShader( warmed );
+					}
+				}
+			}
 			const GLchar *pVitaSource = vitaSource.c_str();
 			GLint nVitaLength = (GLint)vitaSource.size();
 			gGL->glShaderSource( glslDesc->m_object.glsl, 1, &pVitaSource, &nVitaLength );
@@ -383,7 +462,15 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 			// compile
 			{
 				VITA_PERF_SCOPE( VITA_PERF_SHADER_COMPILE );
+#ifdef PLATFORM_VITA
+				if ( bVitaNoDiscard )
+					vglSetupRuntimeShaderCompiler( VITA_SHARK_OPT_DEFAULT, GL_TRUE, GL_FALSE, GL_TRUE );
+#endif
 				gGL->glCompileShader( glslDesc->m_object.glsl );
+#ifdef PLATFORM_VITA
+				if ( bVitaNoDiscard )
+					vglSetupRuntimeShaderCompiler( VITA_SHARK_OPT_FAST, GL_TRUE, GL_FALSE, GL_TRUE );
+#endif
 			}
 
 			GLint isCompiled = 0;
@@ -595,6 +682,82 @@ GLMShaderLimitDesc	g_glmShaderLimitDescs[] =
 
 #undef LMD
 
+#ifdef PLATFORM_VITA
+DLL_EXPORT void ToGLVitaCompileAlphaTestVariants( bool bNow )
+{
+	s_bVitaCompileAlphaTestNow = bNow;
+}
+
+// The alpha test variant compiled from the kept source (which stays), or 0
+GLuint CGLMProgram::VitaCompileAlphaTestSource( bool *pbFailed )
+{
+	if ( pbFailed )
+		*pbFailed = false;
+	char *pText = m_pVitaAlphaTestSource;
+	if ( CLZSS::IsCompressed( (const unsigned char *)m_pVitaAlphaTestSource ) )
+	{
+		const unsigned int nSize = CLZSS::GetActualSize( (const unsigned char *)m_pVitaAlphaTestSource );
+		pText = (char *)malloc( nSize + 1 );
+		if ( pText )
+		{
+			CLZSS().Uncompress( (const unsigned char *)m_pVitaAlphaTestSource, (unsigned char *)pText );
+			pText[nSize] = 0;
+		}
+	}
+	GLuint shader = pText ? gGL->glCreateShader( GL_FRAGMENT_SHADER ) : 0;
+	if ( !shader )
+	{
+		// no memory or no free shader slot (vitaGL's table is full): the
+		// source stays, so a later link can try again
+		Warning( "[vita] alpha test variant of %s not compiled now (%s), using the plain shader\n", m_shaderName, pText ? "no free shader object" : "out of memory" );
+	}
+	else
+	{
+		const GLchar *pSource = pText;
+		GLint nLength = (GLint)strlen( pText );
+		gGL->glShaderSource( shader, 1, &pSource, &nLength );
+		{
+			VITA_PERF_SCOPE( VITA_PERF_SHADER_COMPILE );
+			gGL->glCompileShader( shader );
+		}
+		GLint isCompiled = 0;
+		gGL->glGetShaderiv( shader, GL_COMPILE_STATUS, &isCompiled );
+		if ( isCompiled == GL_FALSE )
+		{
+			GLchar log[4096];
+			log[0] = 0;	// vitaGL writes nothing without a compile log
+			GLint nLogLength = 0;
+			gGL->glGetShaderInfoLog( shader, sizeof( log ), &nLogLength, log );
+			if ( pbFailed )
+				*pbFailed = true;
+			Warning( "[vita] alpha test variant of %s failed to compile, using the plain shader: %s\n", m_shaderName, log );
+			gGL->glDeleteShader( shader );
+			shader = 0;
+		}
+	}
+	if ( pText != m_pVitaAlphaTestSource )
+		free( pText );
+	return shader;
+}
+
+GLuint CGLMProgram::VitaAlphaTestShader( void )
+{
+	if ( m_vitaAlphaTestShader || !m_pVitaAlphaTestSource )
+		return m_vitaAlphaTestShader ? m_vitaAlphaTestShader : m_descs[kGLMGLSL].m_object.glsl;
+
+	bool bFailed;
+	const GLuint shader = VitaCompileAlphaTestSource( &bFailed );
+	if ( shader || bFailed )
+	{
+		// compiled, or the compiler rejected it: no second try
+		free( m_pVitaAlphaTestSource );
+		m_pVitaAlphaTestSource = NULL;
+	}
+	m_vitaAlphaTestShader = shader;
+	return shader ? shader : m_descs[kGLMGLSL].m_object.glsl;
+}
+#endif
+
 bool CGLMProgram::CheckValidity( EGLMProgramLang lang )
 {
 	static char *targnames[] = { "vertex", "fragment" };
@@ -730,6 +893,8 @@ CGLMShaderPair::CGLMShaderPair( GLMContext *ctx  )
 {
 	m_ctx = ctx;
 	m_vertexProg = m_fragmentProg = NULL;
+	m_bAlphaTest = false;
+	m_fragmentShader = 0;
 
 	m_program = gGL->glCreateProgram();
 #ifdef PLATFORM_VITA
@@ -948,7 +1113,7 @@ bool CGLMShaderPair::ValidateProgramPair()
 }
 
 // glUseProgram() will be called as a side effect!
-bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
+bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp, bool bAlphaTest )
 {
 	VITA_CHECK_RENDER_THREAD( "shader pair linked" );
 	bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
@@ -998,8 +1163,9 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 		
 		if (m_fragmentProg)
 		{
-			gGL->glDetachShader(m_program, m_fragmentProg->m_descs[kGLMGLSL].m_object.glsl);
+			gGL->glDetachShader(m_program, m_fragmentShader);
 			m_fragmentProg = NULL;			
+			m_fragmentShader = 0;
 		}
 		
 		// now attach
@@ -1007,7 +1173,14 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 		gGL->glAttachShader( m_program, vp->m_descs[kGLMGLSL].m_object.glsl );
 		m_vertexProg = vp;
 
-		gGL->glAttachShader( m_program, fp->m_descs[kGLMGLSL].m_object.glsl );
+#ifdef PLATFORM_VITA
+		// draws with alpha test on get the pixel shader's discard variant
+		m_fragmentShader = bAlphaTest ? fp->VitaAlphaTestShader() : fp->m_descs[kGLMGLSL].m_object.glsl;
+#else
+		m_fragmentShader = fp->m_descs[kGLMGLSL].m_object.glsl;
+#endif
+		m_bAlphaTest = bAlphaTest;
+		gGL->glAttachShader( m_program, m_fragmentShader );
 		m_fragmentProg = fp;
 	
 		// force the locations for input attributes v0-vN to be at locations 0-N
@@ -1108,7 +1281,7 @@ bool	CGLMShaderPair::RefreshProgramPair		( void )
 
 	if (vpgood && fpgood)
 	{
-		SetProgramPair( vp, fp );
+		SetProgramPair( vp, fp, m_bAlphaTest );
 	}
 	else
 	{
@@ -1316,7 +1489,8 @@ CGLMShaderPair	*CGLMShaderPairCache::SelectShaderPairInternal( CGLMProgram *vp, 
 	newentry->m_extraKeyBits = extraKeyBits;
 	newentry->m_pair = new CGLMShaderPair( m_ctx );
 	Assert( newentry->m_pair );
-	newentry->m_pair->SetProgramPair( vp, fp );
+	// extra key bit 0: alpha test on (GLMContext::FlushDrawStates)
+	newentry->m_pair->SetProgramPair( vp, fp, ( extraKeyBits & 1 ) != 0 );
 
 	if (loglevel >= 2)  // say a little bit more
 	{

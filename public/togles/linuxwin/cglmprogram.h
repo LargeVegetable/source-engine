@@ -178,6 +178,16 @@ public:
 	
 	bool					m_bTranslatedProgram;
 
+#ifdef PLATFORM_VITA
+	// Alpha test variant of a pixel shader (the discard only it has): its
+	// converted source is kept from Compile until the first draw with alpha
+	// test on compiles it
+	GLuint					VitaAlphaTestShader( void );	// that variant's shader object, or the plain one
+	GLuint					VitaCompileAlphaTestSource( bool *pbFailed );	// compiled from the kept source (which stays), or 0; *pbFailed: the compiler rejected it
+	GLuint					m_vitaAlphaTestShader;			// 0 until compiled
+	char					*m_pVitaAlphaTestSource;		// NULL when compiled, or when the shader has no alpha test
+#endif
+
 	char					m_shaderName[64];
 
 	// Cache label string from the shader text
@@ -203,6 +213,13 @@ struct GLMShaderPairInfo
 	int		m_psDynamicIndex;
 };
 
+#ifdef PLATFORM_VITA
+// Where dx9asmtogl2 puts the alpha test discard of a pixel shader; the
+// discard line itself goes only into the shader's alpha test variant
+#define GLM_VITA_ALPHATEST_MARKER "// alpha test discard (variant only)"
+#define GLM_VITA_ALPHATEST_DISCARD "if( gl_FragData[0].a < alpha_ref ) { discard; };"
+#endif
+
 class CGLMShaderPair					// a container for a linked GLSL shader pair, and metadata obtained post-link
 {
 
@@ -218,7 +235,7 @@ public:
 	CGLMShaderPair( GLMContext *ctx  );
 	~CGLMShaderPair( );	
 
-	bool	SetProgramPair			( CGLMProgram *vp, CGLMProgram *fp );
+	bool	SetProgramPair			( CGLMProgram *vp, CGLMProgram *fp, bool bAlphaTest = false );
 		// true result means successful link and query
 		// Note that checking the link status and querying the uniform can be optionally
 		// deferred to take advantage of multi-threaded compilation in the driver
@@ -252,6 +269,8 @@ public:
 
 	CGLMProgram				*m_vertexProg;	
 	CGLMProgram				*m_fragmentProg;
+	bool					m_bAlphaTest;			// linked with the pixel shader's alpha test variant
+	GLuint					m_fragmentShader;		// the fragment shader object attached
 
 	GLuint				m_program;				// linked program object
 
