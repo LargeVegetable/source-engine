@@ -35,6 +35,7 @@
 #include "tier0/fasttimer.h"
 #ifdef PLATFORM_VITA
 #include "vita_glsl.h"
+#include "tier1/lzss.h"
 #endif
 
 #if GLMDEBUG && defined( _MSC_VER )
@@ -51,6 +52,38 @@
 #endif
 
 //===============================================================================
+
+#ifdef PLATFORM_VITA
+// PREPARE SHADERS (materialsystem, through ToGLVitaCompileAlphaTestVariants)
+// compiles each pixel shader's alpha test variant as soon as the shader
+// itself, which puts it into vitaGL's shader cache; the variant's shader
+// object is deleted right away (the run's memory stays as it was), and a
+// later alpha-tested draw only loads it from the cache
+static bool s_bVitaCompileAlphaTestNow;
+
+// A variant's source kept LZSS-compressed (text: halved or better), as is
+// when it doesn't compress, or NULL out of memory
+static char *VitaPackText( const std::string &text )
+{
+	unsigned int nCompressed = 0;
+	unsigned char *pCompressed = CLZSS().Compress( (const unsigned char *)text.c_str(), (int)text.size() + 1, &nCompressed );
+	if ( !pCompressed )
+		return strdup( text.c_str() );
+	// shrunk to the compressed size (kept as it is if that fails)
+	char *pShrunk = (char *)realloc( pCompressed, nCompressed );
+	return pShrunk ? pShrunk : (char *)pCompressed;
+}
+
+// SceShaccCg at vitaGL's default -O3 with fastmath hits "fatal internal
+// error" on some pixel shaders once their alpha test discard is gone (e.g.
+// a lightmappedgeneric_ps20b combo with envmap and fog), and after that
+// every compile in the process fails. The same shaders compile at -O2, so
+// pixel shaders without the discard are compiled at -O2 and vitaGL's
+// defaults are put back after
+extern "C" void vglSetupRuntimeShaderCompiler( int opt_level, int32_t use_fastmath, int32_t use_fastprecision, int32_t use_fastint );
+#define VITA_SHARK_OPT_DEFAULT	2	// shark_opt: -O2
+#define VITA_SHARK_OPT_FAST		3	// -O3, vitaGL's default
+#endif
 
 ConVar	gl_shaderpair_cacherows_lg2( "gl_paircache_rows_lg2", "10");		// 10 is minimum
 ConVar	gl_shaderpair_cacheways_lg2( "gl_paircache_ways_lg2", "5");		// 5 is minimum
@@ -140,6 +173,15 @@ CGLMProgram::CGLMProgram( GLMContext *ctx, EGLMProgramType type )
 	m_shaderName[0] = '\0';
 
 	m_bTranslatedProgram = false;
+#ifdef PLATFORM_VITA
+	m_vitaAlphaTestShader = 0;
+	m_pVitaAlphaTestSource = NULL;
+	m_pVitaSpecSource = NULL;
+	m_nVitaSpecialized = 0;
+	m_nVitaSmokeKind = -1;
+	m_vitaSmokeVertexShader = 0;
+	m_bVitaSmokeVertexFailed = false;
+#endif
 
 	m_nCentroidMask = 0;
 	m_nShadowDepthSamplerMask = 0;
@@ -162,6 +204,23 @@ CGLMProgram::~CGLMProgram( )
 		gGL->glDeleteShader( (uint)glslDesc->m_object.glsl );	// why do I need a cast here again ?
 		glslDesc->m_object.glsl = 0;
 	}
+#ifdef PLATFORM_VITA
+	if ( m_vitaAlphaTestShader )
+	{
+		gGL->glDeleteShader( m_vitaAlphaTestShader );
+		m_vitaAlphaTestShader = 0;
+	}
+	free( m_pVitaAlphaTestSource );
+	m_pVitaAlphaTestSource = NULL;
+	for ( int i = 0; i < m_nVitaSpecialized; i++ )
+		gGL->glDeleteShader( m_vitaSpecialized[i].m_shader );
+	m_nVitaSpecialized = 0;
+	free( m_pVitaSpecSource );
+	m_pVitaSpecSource = NULL;
+	if ( m_vitaSmokeVertexShader )
+		gGL->glDeleteShader( m_vitaSmokeVertexShader );
+	m_vitaSmokeVertexShader = 0;
+#endif
 
 #if GLMDEBUG
 	if (m_editable)
@@ -373,6 +432,95 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 			// vitaGL only translates GLSL ES 1.00
 			std::string vitaSource;
 			VitaConvertGLSL( section, glslDesc->m_textLength, glslStage == GL_FRAGMENT_SHADER, vitaSource );
+
+			// The alpha test variant: the same text with the discard where
+			// the translator left its marker, converted now (the text may be
+			// freed below) and compiled on its first use (VitaAlphaTestShader)
+			if ( m_vitaAlphaTestShader )
+			{
+				gGL->glDeleteShader( m_vitaAlphaTestShader );
+				m_vitaAlphaTestShader = 0;
+			}
+			free( m_pVitaAlphaTestSource );
+			m_pVitaAlphaTestSource = NULL;
+			for ( int i = 0; i < m_nVitaSpecialized; i++ )
+				gGL->glDeleteShader( m_vitaSpecialized[i].m_shader );
+			m_nVitaSpecialized = 0;
+			free( m_pVitaSpecSource );
+			m_pVitaSpecSource = NULL;
+			m_nVitaSmokeKind = -1;
+			if ( m_vitaSmokeVertexShader )
+				gGL->glDeleteShader( m_vitaSmokeVertexShader );
+			m_vitaSmokeVertexShader = 0;
+			m_bVitaSmokeVertexFailed = false;
+			bool bVitaNoDiscard = false;
+			// vertexlit_and_unlit_generic vertex shaders keep their text for
+			// the smoke variant (VitaSmokeVertexShader)
+			if ( glslStage == GL_VERTEX_SHADER && !V_strncmp( m_shaderName, "vertexlit_and_unlit_generic_vs", 30 ) )
+			{
+				m_pVitaSpecSource = VitaPackText( vitaSource );
+				// PREPARE SHADERS: its smoke variant into the shader cache
+				if ( s_bVitaCompileAlphaTestNow && VitaSmokeVertexShader() )
+				{
+					gGL->glDeleteShader( m_vitaSmokeVertexShader );
+					m_vitaSmokeVertexShader = 0;
+				}
+			}
+			if ( glslStage == GL_FRAGMENT_SHADER )
+			{
+				std::string alphaTestText( section, glslDesc->m_textLength );
+				const size_t nMarker = alphaTestText.find( GLM_VITA_ALPHATEST_MARKER );
+				if ( nMarker != std::string::npos )
+				{
+					bVitaNoDiscard = true;
+					alphaTestText.replace( nMarker, sizeof( GLM_VITA_ALPHATEST_MARKER ) - 1, GLM_VITA_ALPHATEST_DISCARD );
+					std::string alphaTestSource;
+					VitaConvertGLSL( alphaTestText.c_str(), (int)alphaTestText.size(), true, alphaTestSource );
+					// kept compressed: most pixel shaders are never drawn with
+					// alpha test, and hundreds can be alive (the source is
+					// text, LZSS halves it or better)
+					m_pVitaAlphaTestSource = VitaPackText( alphaTestSource );
+
+					// vertexlit_and_unlit_generic (models, unlit surfaces,
+					// particles): the plain text is kept for its specialized
+					// variants (VitaSpecializedShader)
+					if ( !V_strncmp( m_shaderName, "vertexlit_and_unlit_generic_ps", 30 ) )
+						m_pVitaSpecSource = VitaPackText( vitaSource );
+
+					// PREPARE SHADERS: into the shader cache now, the object
+					// deleted at once (ToGLVitaCompileAlphaTestVariants)
+					if ( s_bVitaCompileAlphaTestNow && m_pVitaAlphaTestSource )
+					{
+						const GLuint warmed = VitaCompileAlphaTestSource( NULL );
+						if ( warmed )
+							gGL->glDeleteShader( warmed );
+					}
+					// and the specialized variants most draws use: opaque
+					// (writing depth to alpha), translucent, translucent with
+					// vertex alpha; range fog (not height fog), sRGB writes on
+					if ( s_bVitaCompileAlphaTestNow && m_pVitaSpecSource )
+					{
+						static const uint s_nWarmKeys[] = {
+							GLM_VITA_KEY_SPECIALIZED | ( 2 << GLM_VITA_KEY_C12_SHIFT ) | GLM_VITA_KEY_SRGB,
+							GLM_VITA_KEY_SPECIALIZED | GLM_VITA_KEY_SRGB,
+							GLM_VITA_KEY_SPECIALIZED | ( 8 << GLM_VITA_KEY_C12_SHIFT ) | GLM_VITA_KEY_SRGB,
+						};
+						for ( int i = 0; i < ARRAYSIZE( s_nWarmKeys ); i++ )
+						{
+							const GLuint warmed = VitaCompileSpecialized( s_nWarmKeys[i], NULL );
+							if ( warmed )
+								gGL->glDeleteShader( warmed );
+						}
+						// and the smoke variant
+						if ( VitaSmokeKind( true ) )
+						{
+							const GLuint warmedSmoke = VitaCompileSpecialized( s_nWarmKeys[2] | GLM_VITA_KEY_SMOKE, NULL );
+							if ( warmedSmoke )
+								gGL->glDeleteShader( warmedSmoke );
+						}
+					}
+				}
+			}
 			const GLchar *pVitaSource = vitaSource.c_str();
 			GLint nVitaLength = (GLint)vitaSource.size();
 			gGL->glShaderSource( glslDesc->m_object.glsl, 1, &pVitaSource, &nVitaLength );
@@ -383,7 +531,15 @@ void	CGLMProgram::Compile( EGLMProgramLang lang )
 			// compile
 			{
 				VITA_PERF_SCOPE( VITA_PERF_SHADER_COMPILE );
+#ifdef PLATFORM_VITA
+				if ( bVitaNoDiscard )
+					vglSetupRuntimeShaderCompiler( VITA_SHARK_OPT_DEFAULT, GL_TRUE, GL_FALSE, GL_TRUE );
+#endif
 				gGL->glCompileShader( glslDesc->m_object.glsl );
+#ifdef PLATFORM_VITA
+				if ( bVitaNoDiscard )
+					vglSetupRuntimeShaderCompiler( VITA_SHARK_OPT_FAST, GL_TRUE, GL_FALSE, GL_TRUE );
+#endif
 			}
 
 			GLint isCompiled = 0;
@@ -595,6 +751,277 @@ GLMShaderLimitDesc	g_glmShaderLimitDescs[] =
 
 #undef LMD
 
+#ifdef PLATFORM_VITA
+DLL_EXPORT void ToGLVitaCompileAlphaTestVariants( bool bNow )
+{
+	s_bVitaCompileAlphaTestNow = bNow;
+}
+
+// The kept source of a variant, plain text again (malloc'd, or NULL)
+static char *VitaUnpackText( const char *pPacked )
+{
+	if ( !CLZSS::IsCompressed( (const unsigned char *)pPacked ) )
+		return strdup( pPacked );
+	const unsigned int nSize = CLZSS::GetActualSize( (const unsigned char *)pPacked );
+	char *pText = (char *)malloc( nSize + 1 );
+	if ( pText )
+	{
+		CLZSS().Uncompress( (const unsigned char *)pPacked, (unsigned char *)pText );
+		pText[nSize] = 0;
+	}
+	return pText;
+}
+
+// A fragment shader object compiled from pText, or 0. Text without the
+// alpha test discard compiles at -O2 (see VITA_SHARK_OPT_DEFAULT). Not
+// compiled for want of memory or a free shader slot: 0 with *pbFailed false,
+// so a later link can try again
+GLuint CGLMProgram::VitaCompileFragmentText( const char *pText, const char *pWhat, bool bNoDiscard, bool *pbFailed, GLenum nStage )
+{
+	if ( pbFailed )
+		*pbFailed = false;
+	GLuint shader = pText ? gGL->glCreateShader( nStage ) : 0;
+	if ( !shader )
+	{
+		Warning( "[vita] %s of %s not compiled now (%s), using the plain shader\n", pWhat, m_shaderName, pText ? "no free shader object" : "out of memory" );
+		return 0;
+	}
+	const GLchar *pSource = pText;
+	GLint nLength = (GLint)strlen( pText );
+	gGL->glShaderSource( shader, 1, &pSource, &nLength );
+	{
+		VITA_PERF_SCOPE( VITA_PERF_SHADER_COMPILE );
+		if ( bNoDiscard )
+			vglSetupRuntimeShaderCompiler( VITA_SHARK_OPT_DEFAULT, GL_TRUE, GL_FALSE, GL_TRUE );
+		gGL->glCompileShader( shader );
+		if ( bNoDiscard )
+			vglSetupRuntimeShaderCompiler( VITA_SHARK_OPT_FAST, GL_TRUE, GL_FALSE, GL_TRUE );
+	}
+	GLint isCompiled = 0;
+	gGL->glGetShaderiv( shader, GL_COMPILE_STATUS, &isCompiled );
+	if ( isCompiled == GL_FALSE )
+	{
+		GLchar log[4096];
+		log[0] = 0;	// vitaGL writes nothing without a compile log
+		GLint nLogLength = 0;
+		gGL->glGetShaderInfoLog( shader, sizeof( log ), &nLogLength, log );
+		if ( pbFailed )
+			*pbFailed = true;
+		Warning( "[vita] %s of %s failed to compile, using the plain shader: %s\n", pWhat, m_shaderName, log );
+		gGL->glDeleteShader( shader );
+		shader = 0;
+	}
+	return shader;
+}
+
+// The alpha test variant compiled from the kept source (which stays), or 0
+GLuint CGLMProgram::VitaCompileAlphaTestSource( bool *pbFailed )
+{
+	char *pText = VitaUnpackText( m_pVitaAlphaTestSource );
+	const GLuint shader = VitaCompileFragmentText( pText, "alpha test variant", false, pbFailed );
+	free( pText );
+	return shader;
+}
+
+// A specialized variant (nKey: GLM_VITA_KEY_*) compiled from the kept plain
+// source, or 0. c12, the shader's control flags (pixel fog type, write depth
+// to alpha, water fog to alpha, vertex alpha; vertexlitgeneric_dx9_helper),
+// becomes a local constant, and the sRGB write mix uses the flag's value:
+// the draw uploads exactly these values, so the output is the same
+GLuint CGLMProgram::VitaCompileSpecialized( uint nKey, bool *pbFailed )
+{
+	if ( pbFailed )
+		*pbFailed = false;
+	char *pPlain = VitaUnpackText( m_pVitaSpecSource );
+	if ( !pPlain )
+		return VitaCompileFragmentText( NULL, "specialized variant", true, pbFailed );
+	std::string text( pPlain );
+	free( pPlain );
+
+	char szC12[96];
+	V_snprintf( szC12, sizeof( szC12 ), "\n\tvec4 vita_c12 = vec4( %d.0, %d.0, %d.0, %d.0 );",
+		( nKey >> GLM_VITA_KEY_C12_SHIFT ) & 1, ( nKey >> ( GLM_VITA_KEY_C12_SHIFT + 1 ) ) & 1,
+		( nKey >> ( GLM_VITA_KEY_C12_SHIFT + 2 ) ) & 1, ( nKey >> ( GLM_VITA_KEY_C12_SHIFT + 3 ) ) & 1 );
+	const size_t nMain = text.find( "void main()" );
+	const size_t nBrace = nMain != std::string::npos ? text.find( '{', nMain ) : std::string::npos;
+	if ( nBrace == std::string::npos )
+	{
+		Warning( "[vita] specialized variant of %s: no main(), using the plain shader\n", m_shaderName );
+		if ( pbFailed )
+			*pbFailed = true;
+		return 0;
+	}
+	// Smoke (GLM_VITA_KEY_SMOKE, with the vertex shader's smoke variant):
+	// what the stock body computes for the translucent, vertex alpha, range
+	// fog, sRGB write case, with everything that holds for a whole sprite done
+	// per vertex. sRGB: pow( t * k, 1 / 2.2 ) = pow( t, 1 / 2.2 ) * pow( k, 1 / 2.2 ),
+	// so the texture is read without the sRGB decode (GLMContext::FlushDrawStates)
+	// and the vertex color comes encoded: no log or exp per pixel. The fog mix
+	// happens on encoded values, which is exact without fog and close with
+	// little. Soft fade: oT6.xy is the screen position and oT6.z the sprite's
+	// depth term, both exact per vertex since a sprite faces the view (one
+	// depth over it), so the scene depth read needs no divide. The stock
+	// water fog ratio is always 1 with c12.x 0, so its divide goes
+	if ( nKey & GLM_VITA_KEY_SMOKE )
+	{
+		const int nKind = VitaSmokeKind();
+		if ( !nKind )
+		{
+			if ( pbFailed )
+				*pbFailed = true;
+			return 0;
+		}
+		text.erase( nBrace + 1 );
+		if ( nKind == GLM_VITA_SMOKE_PLAIN )
+		{
+			text +=
+				"\n\tvec4 t = texture2D( sampler0, oT0.xy );"
+				"\n\tfloat f = clamp( min( oT7.x, pc[21].z ), 0.0, 1.0 );"
+				"\n\tgl_FragData[0] = vec4( mix( t.xyz * oT2.xyz, oT7.yzw, f * f ), t.w * oT2.w );"
+				"\n}\n";
+			return VitaCompileFragmentText( text.c_str(), "smoke variant", true, pbFailed );
+		}
+		text +=
+			"\n\tvec4 t = texture2D( sampler0, oT0.xy );"
+			"\n\tfloat d = texture2D( sampler10, oT6.xy ).w;"
+			"\n\tfloat s = clamp( ( d - 0.75 ) * 4.0, 0.0, 1.0 );"
+			"\n\tfloat e = clamp( max( s * s * ( 3.0 - 2.0 * s ), abs( d - oT6.z ) * pc[13].x ), 0.0, 1.0 );"
+			"\n\tfloat f = clamp( min( oT7.x, pc[21].z ), 0.0, 1.0 );"
+			"\n\tgl_FragData[0] = vec4( mix( t.xyz * oT2.xyz, oT7.yzw, f * f ), t.w * oT2.w * e );"
+			"\n}\n";
+		return VitaCompileFragmentText( text.c_str(), "smoke variant", true, pbFailed );
+	}
+
+	for ( size_t n = text.find( "pc[12]", nBrace ); n != std::string::npos; n = text.find( "pc[12]", n ) )
+		text.replace( n, 6, "vita_c12" );
+	text.insert( nBrace + 1, szC12 );
+	const char *pMix = "sRGBFragData, flSRGBWrite )";
+	const size_t nMix = text.find( pMix );
+	if ( nMix != std::string::npos )
+		text.replace( nMix, strlen( pMix ), ( nKey & GLM_VITA_KEY_SRGB ) ? "sRGBFragData, 1.0 )" : "sRGBFragData, 0.0 )" );
+
+	return VitaCompileFragmentText( text.c_str(), "specialized variant", true, pbFailed );
+}
+
+GLuint CGLMProgram::VitaSpecializedShader( uint nKey )
+{
+	const GLuint plain = m_descs[kGLMGLSL].m_object.glsl;
+	if ( !m_pVitaSpecSource )
+		return plain;
+	for ( int i = 0; i < m_nVitaSpecialized; i++ )
+	{
+		if ( m_vitaSpecialized[i].m_nKey == nKey )
+			return m_vitaSpecialized[i].m_shader ? m_vitaSpecialized[i].m_shader : plain;
+	}
+	if ( m_nVitaSpecialized == ARRAYSIZE( m_vitaSpecialized ) )
+		return plain;	// more keys than a shader sees in practice: the rest stay plain
+
+	bool bFailed;
+	const GLuint shader = VitaCompileSpecialized( nKey, &bFailed );
+	if ( shader || bFailed )
+	{
+		// compiled, or the compiler rejected it (0: plain from now on)
+		m_vitaSpecialized[m_nVitaSpecialized].m_nKey = nKey;
+		m_vitaSpecialized[m_nVitaSpecialized].m_shader = shader;
+		m_nVitaSpecialized++;
+	}
+	return shader ? shader : plain;
+}
+
+// Which smoke body this pixel shader has (GLM_VITA_SMOKE_*), or 0. Only
+// bodies read line by line take part: the smoke variant replaces the body
+// with what it computes for the key's flags, so a body with anything more
+// (detail texture, envmap, ...) must not get it. Matched by a hash of the
+// body as ToGL writes it; -vitadebug logs the others drawn with the key's
+// flags, so a new one can be read and added
+int CGLMProgram::VitaSmokeKind( bool bQuiet )
+{
+	if ( m_nVitaSmokeKind >= 0 )
+		return m_nVitaSmokeKind;
+	m_nVitaSmokeKind = 0;
+	char *pPlain = VitaUnpackText( m_pVitaSpecSource );
+	if ( !pPlain )
+		return 0;
+	const char *pBody = strstr( pPlain, "void main()" );
+	uint nHash = 0x811c9dc5;	// FNV-1a
+	for ( const char *c = pBody; c && *c; c++ )
+		nHash = ( nHash ^ (unsigned char)*c ) * 0x01000193;
+	if ( pBody && nHash == 0x5678b73b )	// translucent, vertex color and alpha, $depthblend (particle/particle_noisesphere)
+		m_nVitaSmokeKind = GLM_VITA_SMOKE_SOFT;
+	else if ( pBody && nHash == 0x7002679e )	// the same without $depthblend (particle/particle_smokegrenade)
+		m_nVitaSmokeKind = GLM_VITA_SMOKE_PLAIN;
+	static const bool s_bVitaDebug = CommandLine()->CheckParm( "-vitadebug" ) != NULL;
+	if ( !m_nVitaSmokeKind && pBody && s_bVitaDebug && !bQuiet )
+	{
+		Warning( "[vita] smoke: %s body %08x not known\n", m_shaderName, nHash );
+		char szPath[64];
+		V_snprintf( szPath, sizeof( szPath ), "ux0:data/smoke_%08x.txt", nHash );
+		if ( FILE *pFile = fopen( szPath, "w" ) )
+		{
+			fputs( pPlain, pFile );
+			fclose( pFile );
+		}
+	}
+	free( pPlain );
+	return m_nVitaSmokeKind;
+}
+
+// The smoke variant of a vertexlit_and_unlit_generic vertex shader (pairs
+// with the pixel shader's, VitaCompileSpecialized), or 0. After the stock
+// outputs: the vertex color times the modulation and the tonemap scale,
+// sRGB encoded; oT6 the screen position and the soft fade's depth term;
+// oT7 the range fog's argument and the encoded fog color. vita_pc holds the
+// pixel constants that takes (c1, c13, c21, c29, c30), uploaded by
+// GLMContext::FlushDrawStates
+GLuint CGLMProgram::VitaSmokeVertexShader( void )
+{
+	if ( m_vitaSmokeVertexShader || m_bVitaSmokeVertexFailed || !m_pVitaSpecSource )
+		return m_vitaSmokeVertexShader;
+	char *pPlain = VitaUnpackText( m_pVitaSpecSource );
+	if ( !pPlain )
+		return 0;
+	std::string text( pPlain );
+	free( pPlain );
+	const size_t nMain = text.find( "void main()" );
+	const size_t nEnd = text.rfind( '}' );
+	if ( nMain == std::string::npos || nEnd == std::string::npos || nEnd < nMain
+		|| text.find( "varying vec4 oT2;" ) == std::string::npos || text.find( "varying vec4 oT6;" ) == std::string::npos
+		|| text.find( "varying vec4 oT7;" ) == std::string::npos )
+	{
+		m_bVitaSmokeVertexFailed = true;
+		return 0;
+	}
+	text.insert( nEnd,
+		"\tvec4 vita_p = oT6;"
+		"\n\toT6 = vec4( ( vita_p.xy * vec2( 1.0, -1.0 ) + vita_p.ww ) * ( 0.5 / vita_p.w ), ( vita_p.w - vita_p.z ) * vita_pc[3].w, vita_p.w );"
+		"\n\toT7 = vec4( vita_p.z * vita_pc[2].w - vita_pc[2].x, pow( max( vita_pc[3].xyz, vec3( 0.0 ) ), vec3( 0.454545 ) ) );"
+		"\n\toT2 = vec4( pow( max( oT2.xyz * vita_pc[0].xyz * vita_pc[4].x, vec3( 0.0 ) ), vec3( 0.454545 ) ), oT2.w * vita_pc[0].w );"
+		"\n" );
+	text.insert( nMain, "uniform vec4 vita_pc[5];\n\n" );
+	bool bFailed;
+	m_vitaSmokeVertexShader = VitaCompileFragmentText( text.c_str(), "smoke variant", false, &bFailed, GL_VERTEX_SHADER );
+	m_bVitaSmokeVertexFailed = bFailed;
+	return m_vitaSmokeVertexShader;
+}
+
+GLuint CGLMProgram::VitaAlphaTestShader( void )
+{
+	if ( m_vitaAlphaTestShader || !m_pVitaAlphaTestSource )
+		return m_vitaAlphaTestShader ? m_vitaAlphaTestShader : m_descs[kGLMGLSL].m_object.glsl;
+
+	bool bFailed;
+	const GLuint shader = VitaCompileAlphaTestSource( &bFailed );
+	if ( shader || bFailed )
+	{
+		// compiled, or the compiler rejected it: no second try
+		free( m_pVitaAlphaTestSource );
+		m_pVitaAlphaTestSource = NULL;
+	}
+	m_vitaAlphaTestShader = shader;
+	return shader ? shader : m_descs[kGLMGLSL].m_object.glsl;
+}
+#endif
+
 bool CGLMProgram::CheckValidity( EGLMProgramLang lang )
 {
 	static char *targnames[] = { "vertex", "fragment" };
@@ -730,6 +1157,10 @@ CGLMShaderPair::CGLMShaderPair( GLMContext *ctx  )
 {
 	m_ctx = ctx;
 	m_vertexProg = m_fragmentProg = NULL;
+	m_nVitaKey = 0;
+	m_vertexShader = 0;
+	m_fragmentShader = 0;
+	m_locVitaSmokePC = -1;
 
 	m_program = gGL->glCreateProgram();
 #ifdef PLATFORM_VITA
@@ -871,6 +1302,9 @@ bool CGLMShaderPair::ValidateProgramPair()
 			}
 
 			m_locFragmentParams = gGL->glGetUniformLocation( m_program, "pc" );
+#ifdef PLATFORM_VITA
+			m_locVitaSmokePC = gGL->glGetUniformLocation( m_program, "vita_pc" );
+#endif
 
 			for (uint i = 0; i < kGLMNumProgramTypes; i++)
 			{
@@ -948,7 +1382,7 @@ bool CGLMShaderPair::ValidateProgramPair()
 }
 
 // glUseProgram() will be called as a side effect!
-bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
+bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp, uint nVitaKey )
 {
 	VITA_CHECK_RENDER_THREAD( "shader pair linked" );
 	bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
@@ -992,22 +1426,51 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 		// attempt link. but first, detach any previously attached programs
 		if (m_vertexProg)
 		{
-			gGL->glDetachShader(m_program, m_vertexProg->m_descs[kGLMGLSL].m_object.glsl);
+			gGL->glDetachShader(m_program, m_vertexShader);
 			m_vertexProg = NULL;			
+			m_vertexShader = 0;
 		}
 		
 		if (m_fragmentProg)
 		{
-			gGL->glDetachShader(m_program, m_fragmentProg->m_descs[kGLMGLSL].m_object.glsl);
+			gGL->glDetachShader(m_program, m_fragmentShader);
 			m_fragmentProg = NULL;			
+			m_fragmentShader = 0;
 		}
 		
 		// now attach
 		
-		gGL->glAttachShader( m_program, vp->m_descs[kGLMGLSL].m_object.glsl );
+		m_vertexShader = vp->m_descs[kGLMGLSL].m_object.glsl;
+#ifdef PLATFORM_VITA
+		// smoke: both shaders' variants, or neither (they pass values the
+		// stock ones don't)
+		if ( nVitaKey & GLM_VITA_KEY_SMOKE )
+		{
+			const GLuint vs = vp->VitaSmokeVertexShader();
+			const GLuint fs = vs ? fp->VitaSpecializedShader( nVitaKey ) : 0;
+			if ( vs && fs && fs != fp->m_descs[kGLMGLSL].m_object.glsl )
+				m_vertexShader = vs;
+			else
+				nVitaKey &= ~GLM_VITA_KEY_SMOKE;
+		}
+#endif
+		gGL->glAttachShader( m_program, m_vertexShader );
 		m_vertexProg = vp;
 
-		gGL->glAttachShader( m_program, fp->m_descs[kGLMGLSL].m_object.glsl );
+#ifdef PLATFORM_VITA
+		// draws with alpha test on get the pixel shader's discard variant,
+		// others a specialized variant where the key has one
+		if ( nVitaKey & GLM_VITA_KEY_ALPHATEST )
+			m_fragmentShader = fp->VitaAlphaTestShader();
+		else if ( nVitaKey & GLM_VITA_KEY_SPECIALIZED )
+			m_fragmentShader = fp->VitaSpecializedShader( nVitaKey );
+		else
+			m_fragmentShader = fp->m_descs[kGLMGLSL].m_object.glsl;
+#else
+		m_fragmentShader = fp->m_descs[kGLMGLSL].m_object.glsl;
+#endif
+		m_nVitaKey = nVitaKey;
+		gGL->glAttachShader( m_program, m_fragmentShader );
 		m_fragmentProg = fp;
 	
 		// force the locations for input attributes v0-vN to be at locations 0-N
@@ -1108,7 +1571,7 @@ bool	CGLMShaderPair::RefreshProgramPair		( void )
 
 	if (vpgood && fpgood)
 	{
-		SetProgramPair( vp, fp );
+		SetProgramPair( vp, fp, m_nVitaKey );
 	}
 	else
 	{
@@ -1316,7 +1779,8 @@ CGLMShaderPair	*CGLMShaderPairCache::SelectShaderPairInternal( CGLMProgram *vp, 
 	newentry->m_extraKeyBits = extraKeyBits;
 	newentry->m_pair = new CGLMShaderPair( m_ctx );
 	Assert( newentry->m_pair );
-	newentry->m_pair->SetProgramPair( vp, fp );
+	// extra key bit 0: alpha test on (GLMContext::FlushDrawStates)
+	newentry->m_pair->SetProgramPair( vp, fp, extraKeyBits );
 
 	if (loglevel >= 2)  // say a little bit more
 	{

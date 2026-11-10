@@ -1402,7 +1402,13 @@ class GLMContext
 
 		// writers for the state block inputs
 		
+#ifdef PLATFORM_VITA
+		// alpha test on and off draw with different shader pairs (the discard
+		// variant), so a change selects the pair again
+		FORCEINLINE void	WriteAlphaTestEnable( GLAlphaTestEnable_t *src ) { if ( !src->enable != !m_AlphaTestEnable.GetData().enable ) m_bDirtyPrograms = true; m_AlphaTestEnable.Write( src ); }
+#else
 		FORCEINLINE void	WriteAlphaTestEnable( GLAlphaTestEnable_t *src ) { m_AlphaTestEnable.Write( src ); }
+#endif
 		FORCEINLINE void	WriteAlphaTestFunc( GLAlphaTestFunc_t *src ) { m_AlphaTestFunc.Write( src ); }
 		FORCEINLINE void	WriteAlphaToCoverageEnable( GLAlphaToCoverageEnable_t *src ) { m_AlphaToCoverageEnable.Write( src ); }
 		FORCEINLINE void	WriteCullFaceEnable( GLCullFaceEnable_t *src ) { m_CullFaceEnable.Write( src ); }
@@ -1639,6 +1645,24 @@ class GLMContext
 		GLState<GLBlendColor_t>	m_BlendColor;		
 		GLState<GLBlendEnableSRGB_t>	m_BlendEnableSRGB;		// write to this one to transmit intent to write SRGB encoded pixels to drawing FB
 		bool							m_FakeBlendEnableSRGB;	// writes to above will be shunted here if fake SRGB is in effect.
+#ifdef PLATFORM_VITA
+		uint							m_nVitaPairKey;			// GLM_VITA_KEY_* of the last draw's shader pair (FlushDrawStates)
+		// smoke pairs read their sprite texture without the sRGB decode: set
+		// for the draw (FlushDrawStates), put back right after it, once GXM
+		// has taken the texture's state
+		CGLMTex							*m_pVitaSmokeRawTex;
+		FORCEINLINE void				VitaRestoreSmokeTex( void )
+		{
+			if ( m_pVitaSmokeRawTex )
+			{
+				SelectTMU( 0 );
+				gGL->glTexParameteri( m_pVitaSmokeRawTex->m_texGLTarget, GL_TEXTURE_SRGB_DECODE_EXT,
+					m_pVitaSmokeRawTex->m_SamplingParams.m_packed.m_srgb ? GL_DECODE_EXT : GL_SKIP_DECODE_EXT );
+				m_pVitaSmokeRawTex = NULL;
+			}
+		}
+
+#endif
 		
 		GLState<GLDepthTestEnable_t>	m_DepthTestEnable;	
 		GLState<GLDepthFunc_t>			m_DepthFunc;		
@@ -1934,6 +1958,9 @@ FORCEINLINE void GLMContext::DrawRangeElements(	GLenum mode, GLuint start, GLuin
 	if ( m_pBoundPair )
 	{
 		gGL->glDrawRangeElementsBaseVertex( mode, start, end, count, type, indicesActual, baseVertex );
+#ifdef PLATFORM_VITA
+		VitaRestoreSmokeTex();
+#endif
 
 #if GLMDEBUG
 		if ( m_slowCheckEnable )

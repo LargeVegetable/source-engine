@@ -2573,6 +2573,10 @@ GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 											
 	memset( m_drawingProgram, 0, sizeof( m_drawingProgram ) );
 	m_bDirtyPrograms = true;
+#ifdef PLATFORM_VITA
+	m_nVitaPairKey = 0;
+	m_pVitaSmokeRawTex = NULL;
+#endif
 	memset( m_programParamsF , 0, sizeof( m_programParamsF ) );
 	memset( m_programParamsB , 0, sizeof( m_programParamsB ) );
 	memset( m_programParamsI , 0, sizeof( m_programParamsI ) );

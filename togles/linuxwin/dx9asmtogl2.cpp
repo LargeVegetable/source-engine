@@ -3942,7 +3942,16 @@ int D3DToGL::TranslateShader( uint32* code, CUtlBuffer *pBufDisassembledCode, bo
 	}
 
 	if( !gGL->m_bHave_GL_QCOM_alpha_test && m_iFragDataCount && bVertexShader )
+#ifdef PLATFORM_VITA
+		// A marker, not the discard: a fragment program that can discard
+		// turns off the GPU's hidden surface removal for its draws, and this
+		// line used to be in every pixel shader, alpha test or not. ToGL
+		// compiles a second variant with the discard (CGLMProgram::Compile)
+		// and links it only for draws with alpha test on
+		StrcatToALUCode( GLM_VITA_ALPHATEST_MARKER "\n" );
+#else
 		StrcatToALUCode( "if( gl_FragData[0].a < alpha_ref ) { discard; };\n" );
+#endif
 
 	strcat_s( (char*)m_pBufALUCode->Base(), m_pBufALUCode->Size(), "}\n" );
 

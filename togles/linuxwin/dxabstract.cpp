@@ -5419,6 +5419,11 @@ HRESULT IDirect3DDevice9::DrawIndexedPrimitive( D3DPRIMITIVETYPE Type, INT BaseV
 
 				m_ctx->DrawRangeElements( p.m_nType, (GLuint)MinVertexIndex, (GLuint)( MinVertexIndex + NumVertices - 1 ), (GLsizei)p.m_nPrimAdd + primCount * p.m_nPrimMul, (GLenum)GL_UNSIGNED_SHORT, (const GLvoid *)( startIndex * sizeof(short) ), BaseVertexIndex, m_indices.m_idxBuffer->m_idxBuffer );
 			}
+#ifdef PLATFORM_VITA
+			// a smoke draw's texture back to its sRGB decode even when no
+			// draw was made (DrawRangeElements restores it after its draw)
+			m_ctx->VitaRestoreSmokeTex();
+#endif
 		}
 	}
 
@@ -5690,6 +5695,9 @@ HRESULT IDirect3DDevice9::DrawIndexedPrimitive( D3DPRIMITIVETYPE Type,INT BaseVe
 		m_ctx->DrawRangeElements(GL_TRIANGLE_STRIP, (GLuint)MinVertexIndex, (GLuint)(MinVertexIndex + NumVertices), (GLsizei)(2+primCount), (GLenum)GL_UNSIGNED_SHORT, (const GLvoid *)(startIndex * sizeof(short)), m_indices.m_idxBuffer->m_idxBuffer );
 		break;
 	}
+#ifdef PLATFORM_VITA
+	m_ctx->VitaRestoreSmokeTex();	// see the other DrawIndexedPrimitive
+#endif
 
 	return S_OK;
 
