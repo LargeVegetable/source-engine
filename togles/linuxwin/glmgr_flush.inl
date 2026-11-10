@@ -57,6 +57,10 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 
 	GL_BATCH_PERF( m_FlushStats.m_nTotalBatchFlushes++; )
 
+#ifdef PLATFORM_VITA
+	VitaRestoreSmokeTex();	// a draw that didn't go through DrawRangeElements
+#endif
+
 #if GLMDEBUG
 	bool tex0_srgb = (m_boundDrawFBO[0].m_attach[0].m_tex->m_layout->m_key.m_texFlags & kGLMTexSRGB) != 0;
 
@@ -178,14 +182,59 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 	}
 #endif
 
+#ifdef PLATFORM_VITA
+	// The pixel shader variant this draw needs (the pair cache's extra key,
+	// CGLMShaderPair::SetProgramPair): alpha test on, the discard variant;
+	// otherwise, for shaders with specialized variants, the control flags in
+	// c12 and the sRGB write flag when c12 holds only 0s and 1s. A change
+	// selects the pair again
+	{
+		uint nKey = m_AlphaTestEnable.GetData().enable ? GLM_VITA_KEY_ALPHATEST : 0;
+		const CGLMProgram *pFP = m_drawingProgram[ kGLMFragmentProgram ];
+		if ( !nKey && pFP && pFP->m_pVitaSpecSource )
+		{
+			const float *pC12 = m_programParamsF[ kGLMFragmentProgram ].m_values[ 12 ];
+			uint nFlags = 0;
+			bool bExact = true;
+			for ( int i = 0; i < 4; i++ )
+			{
+				if ( pC12[i] == 1.0f )
+					nFlags |= 1 << i;
+				else if ( pC12[i] != 0.0f )
+					bExact = false;
+			}
+			if ( bExact )
+				nKey = GLM_VITA_KEY_SPECIALIZED | ( nFlags << GLM_VITA_KEY_C12_SHIFT ) | ( m_FakeBlendEnableSRGB ? GLM_VITA_KEY_SRGB : 0 );
+
+			// smoke: translucent with vertex alpha (c12 = 0 0 0 1), sRGB
+			// write, a known body, a vertexlit_and_unlit_generic vertex
+			// shader, and the sprite texture read with the sRGB decode (the
+			// variant reads it raw; without the decode the stock shader's
+			// result differs)
+			static const bool s_bVitaNoSmoke = CommandLine()->FindParm( "-vitanosmoke" ) != 0;
+			const CGLMProgram *pVP = m_drawingProgram[ kGLMVertexProgram ];
+			const CGLMTex *pTex0 = m_samplers[0].m_pBoundTex;
+			// (with sampler objects, vitaGL applies the sampler's decode at
+			// the draw, over the texture's: not with those)
+			if ( !s_bVitaNoSmoke && !m_bUseSamplerObjects && nKey == ( GLM_VITA_KEY_SPECIALIZED | ( 8 << GLM_VITA_KEY_C12_SHIFT ) | GLM_VITA_KEY_SRGB )
+				&& pVP && pVP->m_pVitaSpecSource && pTex0 && ( pTex0->m_layout->m_key.m_texFlags & kGLMTexSRGB )
+				&& m_samplers[0].m_samp.m_packed.m_srgb && const_cast< CGLMProgram * >( pFP )->VitaSmokeKind() )
+				nKey |= GLM_VITA_KEY_SMOKE;
+		}
+		if ( nKey != m_nVitaPairKey )
+		{
+			m_nVitaPairKey = nKey;
+			m_bDirtyPrograms = true;
+		}
+	}
+#endif
+
 	if ( m_bDirtyPrograms )
 	{
 		m_bDirtyPrograms = false;
 
 #ifdef PLATFORM_VITA
-		// extra key bit 0: alpha test on, so the pair with the pixel shader's
-		// discard variant (CGLMShaderPair::SetProgramPair)
-		const uint nExtraKeyBits = m_AlphaTestEnable.GetData().enable ? 1 : 0;
+		const uint nExtraKeyBits = m_nVitaPairKey;
 #else
 		const uint nExtraKeyBits = 0;
 #endif
@@ -642,6 +691,27 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 			m_programParamsF[kGLMFragmentProgram].m_dirtySlotHighWaterNonBone = 0;
 		}
 	}
+
+#ifdef PLATFORM_VITA
+	// smoke: the pixel constants its vertex shader reads, and the sprite
+	// texture without the sRGB decode for this draw (VitaRestoreSmokeTex)
+	if ( m_pBoundPair->m_locVitaSmokePC >= 0 )
+	{
+		const float ( *pPC )[4] = m_programParamsF[kGLMFragmentProgram].m_values;
+		float v[5][4];
+		static const int s_nRegs[5] = { 1, 13, 21, 29, 30 };
+		for ( int i = 0; i < 5; i++ )
+			memcpy( v[i], pPC[ s_nRegs[i] ], sizeof( v[i] ) );
+		gGL->glUniform4fv( m_pBoundPair->m_locVitaSmokePC, 5, &v[0][0] );
+		CGLMTex *pTex0 = m_samplers[0].m_pBoundTex;
+		if ( pTex0 && ( pTex0->m_layout->m_key.m_texFlags & kGLMTexSRGB ) )
+		{
+			SelectTMU( 0 );
+			gGL->glTexParameteri( pTex0->m_texGLTarget, GL_TEXTURE_SRGB_DECODE_EXT, GL_SKIP_DECODE_EXT );
+			m_pVitaSmokeRawTex = pTex0;
+		}
+	}
+#endif
 
 	return;
 

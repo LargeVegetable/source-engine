@@ -416,6 +416,13 @@ COpenGLEntryPoints::COpenGLEntryPoints()
 		m_bHave_GL_ARB_sync = true;
 
 		//	m_bHave_GL_EXT_texture_sRGB_decode = true;
+#ifdef PLATFORM_VITA
+		// vitaGL takes GL_TEXTURE_SRGB_DECODE_EXT on samplers and textures:
+		// sRGB-capable textures, read raw or linearized per sampler as D3D's
+		// SRGBTEXTURE state asks
+		if ( !CommandLine()->FindParm( "-vitanosrgbdecode" ) )
+			m_bHave_GL_EXT_texture_sRGB_decode = true;
+#endif
 
 		if( CommandLine()->FindParm( "-gl_enable_pseudobufs" ) )
 			g_bUsePseudoBufs = true;

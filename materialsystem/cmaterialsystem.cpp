@@ -5635,7 +5635,7 @@ extern "C" size_t vglMemExternalInUse( void );		// launcher (vitaGL): its object
 // bump when the translated shader text changes (togles dx9asmtogl2.cpp,
 // vita_glsl conversion, vitaGL's cache key): old cache entries then miss and
 // "prepared" would be wrong
-#define VITA_PREPARE_STAMP	2	// 2: pixel shaders without the alpha test discard, and their alpha test variants
+#define VITA_PREPARE_STAMP	4	// 2: pixel shaders without the alpha test discard, and their alpha test variants; 3: specialized vertexlit_and_unlit_generic variants; 4: smoke variants
 #define VITA_PREPARE_BATCH	32
 
 typedef int ( *VitaShaderPrepareLoadedFn_t )( uint64_t nDeadline, int *pnCreated, int *pnFailed );

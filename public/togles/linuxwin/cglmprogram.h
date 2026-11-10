@@ -186,6 +186,28 @@ public:
 	GLuint					VitaCompileAlphaTestSource( bool *pbFailed );	// compiled from the kept source (which stays), or 0; *pbFailed: the compiler rejected it
 	GLuint					m_vitaAlphaTestShader;			// 0 until compiled
 	char					*m_pVitaAlphaTestSource;		// NULL when compiled, or when the shader has no alpha test
+
+	// Specialized variants of vertexlit_and_unlit_generic pixel shaders
+	// (GLM_VITA_KEY_SPECIALIZED): the shader's control flags (c12) and the
+	// sRGB write flag baked in as the literals the draw uploads, so the
+	// compiler drops the fog, depth-to-alpha and blend paths they switch off.
+	// The converted source is kept (compressed) for the shader's life
+	GLuint					VitaSpecializedShader( uint nKey );	// that variant's shader object, or the plain one
+	GLuint					VitaCompileSpecialized( uint nKey, bool *pbFailed );	// 0 if it can't be compiled now
+	GLuint					VitaCompileFragmentText( const char *pText, const char *pWhat, bool bNoDiscard, bool *pbFailed, GLenum nStage = GL_FRAGMENT_SHADER );
+	char					*m_pVitaSpecSource;				// NULL for shaders that aren't specialized; vertexlit_and_unlit_generic vertex shaders keep theirs for the smoke variant
+	struct VitaSpecialized_t { uint m_nKey; GLuint m_shader; };
+	VitaSpecialized_t		m_vitaSpecialized[8];
+	int						m_nVitaSpecialized;
+
+	// Smoke (GLM_VITA_KEY_SMOKE): sprites of the translucent, vertex alpha
+	// combos with work per vertex instead of per pixel. A pixel shader takes
+	// part when its body is one of those read and rewritten by hand
+	int						VitaSmokeKind( bool bQuiet = false );	// 0: no, else GLM_VITA_SMOKE_*; bQuiet: no -vitadebug note
+	int						m_nVitaSmokeKind;				// -1 until looked at
+	GLuint					VitaSmokeVertexShader( void );	// the vertex shader's smoke variant, or 0
+	GLuint					m_vitaSmokeVertexShader;
+	bool					m_bVitaSmokeVertexFailed;
 #endif
 
 	char					m_shaderName[64];
@@ -218,6 +240,17 @@ struct GLMShaderPairInfo
 // discard line itself goes only into the shader's alpha test variant
 #define GLM_VITA_ALPHATEST_MARKER "// alpha test discard (variant only)"
 #define GLM_VITA_ALPHATEST_DISCARD "if( gl_FragData[0].a < alpha_ref ) { discard; };"
+
+// Shader pair key bits (the pair cache's extra key)
+#define GLM_VITA_KEY_ALPHATEST		1	// the pixel shader's alpha test variant
+#define GLM_VITA_KEY_SPECIALIZED	2	// a specialized variant (CGLMProgram::VitaSpecializedShader):
+#define GLM_VITA_KEY_C12_SHIFT		2	// bits 2-5: c12.xyzw, each 0 or 1
+#define GLM_VITA_KEY_SRGB			64	// bit 6: flSRGBWrite is 1
+#define GLM_VITA_KEY_SMOKE			256	// the smoke pair: both shaders' smoke variants (CGLMProgram::VitaSmokeKind)
+
+// Smoke pixel shader bodies (CGLMProgram::VitaSmokeKind)
+#define GLM_VITA_SMOKE_SOFT			1	// soft particles: fade where the sprite meets the scene
+#define GLM_VITA_SMOKE_PLAIN		2	// no soft fade
 #endif
 
 class CGLMShaderPair					// a container for a linked GLSL shader pair, and metadata obtained post-link
@@ -235,7 +268,7 @@ public:
 	CGLMShaderPair( GLMContext *ctx  );
 	~CGLMShaderPair( );	
 
-	bool	SetProgramPair			( CGLMProgram *vp, CGLMProgram *fp, bool bAlphaTest = false );
+	bool	SetProgramPair			( CGLMProgram *vp, CGLMProgram *fp, uint nVitaKey = 0 );
 		// true result means successful link and query
 		// Note that checking the link status and querying the uniform can be optionally
 		// deferred to take advantage of multi-threaded compilation in the driver
@@ -269,8 +302,10 @@ public:
 
 	CGLMProgram				*m_vertexProg;	
 	CGLMProgram				*m_fragmentProg;
-	bool					m_bAlphaTest;			// linked with the pixel shader's alpha test variant
+	uint					m_nVitaKey;				// GLM_VITA_KEY_*: the pixel shader variant linked
+	GLuint					m_vertexShader;			// the vertex shader object attached
 	GLuint					m_fragmentShader;		// the fragment shader object attached
+	GLint					m_locVitaSmokePC;		// "vita_pc": the pixel constants the smoke vertex variant reads
 
 	GLuint				m_program;				// linked program object
 
